@@ -59,7 +59,8 @@ float VelocityDobController::operator()(FOCMotor* motor) {
   float y = LPF_vel(motor->shaft_velocity);
 
   // 2. Обработка задания
-  float r = processTarget(rateLimit(motor->target));
+  // float r = processTarget(rateLimit(motor->target));
+  float r = processTarget(motor->target);
 
   // 3. Ошибка
   float error = r - y;
