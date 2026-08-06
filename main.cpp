@@ -3,19 +3,25 @@
 
 #include "VelocityDobController.h"
 #include "config.h"
+#include "encoders/calibrated/CalibratedSensor.h"
 
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
+
+CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, 100);
+
 BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
 BLDCDriver3PWM driver =
     BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
 volatile float target_velocity = 0.0f;
 
+#define configTICK_RATE_HZ ((TickType_t)10000)
+
 int powerOn = 0;
 
 // Экземпляр регулятора
 VelocityDobController controller;                     // сам объект
-VelocityDobController* controller_ptr = &controller;  // указатель дляобёртки
+VelocityDobController* controller_ptr = &controller;  // указатель для  обёртки
 
 float customMotionControlWrapper(FOCMotor* motor) {
   return (*controller_ptr)(motor);  // вызываем operator()
@@ -51,8 +57,8 @@ void motorControlTask(void* pvParameters) {
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
+  Serial.begin(230400);
+  Serial1.begin(230400, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
   SimpleFOCDebug::enable(&Serial);
 
   // Железо
@@ -78,6 +84,9 @@ void setup() {
   motor.useMonitoring(Serial);
 
   motor.init();
+  sensor_calibrated.calibrate(motor);
+  motor.linkSensor(&sensor_calibrated);
+
   motor.initFOC();
 
   // Команды
@@ -95,7 +104,7 @@ void setup() {
   _delay(1000);
 
   xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
-                          1);
+                          0);
 
   // powerOn = 1.0;
   // target_velocity = 0.0f;
