@@ -90,6 +90,8 @@ void motorControlTask(void* pvParameters) {
       motor.loopFOC();
       motor.move(last_smooth_target);
     } else {
+      last_smooth_target = 0.0f;
+      lowSpeed.reset();
       motor.move(0);
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -98,114 +100,99 @@ void motorControlTask(void* pvParameters) {
 
 // Глобально
 
+// ===================== Фильтр скорости для PI (сильнее, чем LPF SimpleFOC) =====================
+LowPassFilter LPF_vel_ctrl(0.08f);   // 80 мс — критично для 0.2–0.5 рад/с
+
 
 float stage2MotionControl(FOCMotor* m) {
-  // 1. Ошибка скорости
-  float error = last_smooth_target - m->shaft_velocity;
+  // Сильно сглаженная скорость только для регулятора
+  float y = LPF_vel_ctrl(m->shaft_velocity);
 
-  // 2. Встроенный PI SimpleFOC можно вызвать вручную,
-  //    но проще использовать свой мини-PI или оставить motor.PID_velocity
-  float u_pid = motor.PID_velocity(error);  // использует P, I, ramp, limit
+  float error = last_smooth_target - y;
 
-  // 3. Компенсация трения
-  float u_ff = lowSpeed.frictionCompensation(m->shaft_velocity);
+  float u_pid = motor.PID_velocity(error);
+  float u_ff = lowSpeed.frictionCompensation(y);
 
   float u = u_pid + u_ff;
-  u = constrain(u, -m->voltage_limit, m->voltage_limit);
-  return u;
+  return constrain(u, -m->voltage_limit, m->voltage_limit);
 }
 
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
-  
-  // Временно отключите debug на время калибровки (можно включить потом)
-  // SimpleFOCDebug::enable(&Serial);   // ← закомментируйте на время теста
 
   sensor.init();
-  motor.linkSensor(&sensor);               // сначала сырой датчик
+  motor.linkSensor(&sensor);
 
   driver.voltage_power_supply = POWER_SUPPLY;
   driver.init();
   motor.linkDriver(&driver);
 
-  // Режим управления
   motor.linkCustomMotionControl(stage2MotionControl);
   motor.controller = MotionControlType::custom;
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
-  // PID и лимиты
-  motor.PID_velocity.P = 0.15f;
-  motor.PID_velocity.I = 3.0f;
+  // ---- Мягкий PID под малые скорости ----
+  motor.PID_velocity.P = 0.08f;
+  motor.PID_velocity.I = 0.6f;
   motor.PID_velocity.D = 0.0f;
-  motor.PID_velocity.output_ramp = 300.0f;
+  motor.PID_velocity.output_ramp = 120.0f;
   motor.PID_velocity.limit = VOLTAGE_LIMIT;
-  motor.LPF_velocity.Tf = 0.02f;
-  motor.voltage_limit = VOLTAGE_LIMIT;
+
+  // Фильтр SimpleFOC (для shaft_velocity / телеметрии)
+  motor.LPF_velocity.Tf = 0.04f;
+
+  motor.voltage_limit = 4.0f;      // на время отладки низких скоростей
+  motor.PID_velocity.limit = motor.voltage_limit;
   motor.velocity_limit = 20.0f;
 
-  lowSpeed.setParams(8.0f, 0.08f, 0.30f);
-  lowSpeed.setFriction(0.0f, 0.0f, 0.15f);
+  // Зоны: 0.26 не должно «ломаться» soft-зоной
+  lowSpeed.setParams(5.0f, 0.04f, 0.12f);   // accel, deadzone, soft_zone
+  lowSpeed.setFriction(0.0f, 0.0f, 0.12f);  // трение пока 0
 
-  // ===================== КРИТИЧНО: motor.init() ПЕРЕД calibrate =====================
-  motor.useMonitoring(Serial);             // лучше после init, но можно здесь
-  motor.init();                            // ← обязательно до calibrate
-
-  #if MOTOR_IS_CALIBRATED
-    // Уже откалибровано — просто задаём значения
-    motor.zero_electric_angle = zero_electric_angle_calibrated;
-    motor.sensor_direction = sensor_direction_calibrated;
-    motor.linkSensor(&sensor_calibrated);  // переключаемся на калиброванный
-    motor.initFOC();                       // выравнивание пропускается
-  #else
-    // Калибровка
-    // sensor_calibrated.voltage_calibration = 3.0f;  // при необходимости уменьшить
-    sensor_calibrated.calibrate(motor);    // теперь безопасно
-
-    // После калибровки переключаемся
-    motor.linkSensor(&sensor_calibrated);
-    motor.initFOC();                       // или можно не вызывать, если calibrate уже сделал
-  #endif
-
-  motor.useMonitoring(Serial);
   motor.init();
+
+#if MOTOR_IS_CALIBRATED
+  motor.zero_electric_angle = zero_electric_angle_calibrated;
+  motor.sensor_direction = sensor_direction_calibrated;
   motor.linkSensor(&sensor_calibrated);
   motor.initFOC();
+#else
+  sensor_calibrated.calibrate(motor);
+  motor.linkSensor(&sensor_calibrated);
+  motor.initFOC();
+#endif
 
-  // ========== Все команды Commander ==========
+  // Commander
   command.add('T', doTarget, "target velocity [rad/s]");
   command.add('W', doPower, "power 0/1");
-
   command.add('P', doP, "PID P");
   command.add('I', doI, "PID I");
   command.add('D', doD, "PID D");
   command.add('R', doRamp, "PID output_ramp");
-
-  command.add('F', doTf, "LPF velocity Tf");
+  command.add('F', doTf, "LPF SimpleFOC Tf");
   command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
+  command.add('A', doAccel, "max_accel");
+  command.add('Z', doDead, "deadzone");
+  command.add('S', doSoft, "soft_zone");
+  command.add('C', doCoulomb, "coulomb");
+  command.add('B', doViscous, "viscous");
+  command.add('N', doSoftSign, "soft sign");
 
-  command.add('A', doAccel, "max_accel [rad/s^2]");
-  command.add('Z', doDead, "deadzone [rad/s]");
-  command.add('S', doSoft, "soft_zone [rad/s]");
-
-  command.add('C', doCoulomb, "coulomb friction [V]");
-  command.add('B', doViscous, "viscous friction [V/(rad/s)]");
-  command.add('N', doSoftSign, "soft sign zone [rad/s]");
+  // Отдельный фильтр регулятора
+  command.add('E', [](char* cmd) {
+    command.scalar(&LPF_vel_ctrl.Tf, cmd);
+  }, "LPF controller Tf");
 
   command.verbose = VerboseMode::nothing;
 
-  Serial.println(F("=== Stage 1: Low-speed closed-loop velocity ==="));
-  Serial.println(
-      F("T-target  W-power  P/I/D/R-PID  F-LPF  L-Vlim  V-velLim  A-accel  "
-        "Z-dead  S-soft"));
-  _delay(500);
+  Serial.println(F("Low-speed fix: strong LPF + soft PI"));
+  _delay(300);
 
-  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
-                          1);
+  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL, 1);
 }
-
 void loop() {
   command.run();
   Serial1.printf("%.3f,%.3f,%.3f\n", target_velocity, motor.shaft_velocity,
