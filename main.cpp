@@ -96,11 +96,24 @@ void setup() {
 
   xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
                           1);
+
+  // powerOn = 1.0;
+  // target_velocity = 0.0f;
+  // delay(500);
+  // float angle = 0.0;
+
+  // for (float i = 0.0f; i < 2.0 * PI; i += (2.0 * PI) / 1000.0) {
+  //   target_velocity = i;
+  //   delay(10);
+  //   angle = motor.shaftAngle() + motor.sensor_offset;
+
+  //   Serial1.printf("%.3f,%.3f\n", target_velocity, angle);
+  // }
 }
 
 void loop() {
   command.run();
-  Serial1.printf("vel:%.3f\n", motor.shaft_velocity);
+  Serial1.printf("%.3f,%.3f\n", target_velocity, motor.shaft_velocity);
 }
 
 // /**
