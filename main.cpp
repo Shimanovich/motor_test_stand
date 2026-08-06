@@ -8,6 +8,7 @@
 
 #include "LowSpeedVelocityController.h"
 #include "config.h"
+#include "luts.h"
 
 // ===================== Железо =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
@@ -15,34 +16,21 @@ BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
 BLDCDriver3PWM driver =
     BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
+
+
 // ===================== Калибровка =====================
 #define MOTOR_IS_CALIBRATED 1
 
-float calibrationLut[100] = {
-    -0.000688, -0.001537, -0.001537, -0.001537, -0.002271, -0.002271, -0.002271,
-    -0.002507, -0.002507, -0.002507, -0.003049, -0.003049, -0.003049, -0.004359,
-    -0.004359, -0.004359, -0.003674, -0.003674, -0.003674, -0.001992, -0.001992,
-    -0.000617, -0.000617, -0.000617, 0.002100,  0.002100,  0.002100,  0.004779,
-    0.004779,  0.004779,  0.005234,  0.005234,  0.005234,  0.005612,  0.005612,
-    0.005612,  0.006067,  0.006067,  0.006067,  0.004566,  0.004566,  0.003486,
-    0.003486,  0.003486,  0.003135,  0.003135,  0.003135,  0.001557,  0.001557,
-    0.001557,  -0.000097, -0.000097, -0.000097, -0.001176, -0.001176, -0.001176,
-    -0.002286, -0.002286, -0.002286, -0.003196, -0.003196, -0.004221, -0.004221,
-    -0.004221, -0.004226, -0.004226, -0.004226, -0.004078, -0.004078, -0.004078,
-    -0.003087, -0.003087, -0.003087, -0.001712, -0.001712, -0.001712, -0.000797,
-    -0.000797, -0.000797, 0.000655,  0.000655,  0.002299,  0.002299,  0.002299,
-    0.002331,  0.002331,  0.002331,  0.002096,  0.002096,  0.002096,  0.001937,
-    0.001937,  0.001937,  0.000551,  0.000551,  0.000551,  -0.000835, -0.000835,
-    -0.000835, -0.000688};
 
-float zero_electric_angle_calibrated = 0.268594f;
-Direction sensor_direction_calibrated = Direction::CW;
+
+
+
 
 #if MOTOR_IS_CALIBRATED
 CalibratedSensor sensor_calibrated =
-    CalibratedSensor(sensor, 100, calibrationLut);
+    CalibratedSensor(sensor, LUTS_TOTAL, calibrationLut);
 #else
-CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, 100);
+CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 #endif
 
 // ===================== Управление =====================
@@ -90,6 +78,7 @@ void doCoulomb(char* cmd) { command.scalar(&lowSpeed.coulomb(), cmd); }
 void doViscous(char* cmd) { command.scalar(&lowSpeed.viscous(), cmd); }
 void doSoftSign(char* cmd) { command.scalar(&lowSpeed.softSign(), cmd); }
 
+float last_smooth_target = 0.0f;
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -108,7 +97,7 @@ void motorControlTask(void* pvParameters) {
 }
 
 // Глобально
-float last_smooth_target = 0.0f;
+
 
 float stage2MotionControl(FOCMotor* m) {
   // 1. Ошибка скорости
@@ -127,32 +116,31 @@ float stage2MotionControl(FOCMotor* m) {
 }
 
 void setup() {
-  Serial.begin(230400);
-  Serial1.begin(230400, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
-  SimpleFOCDebug::enable(&Serial);
+  Serial.begin(115200);
+  Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
+  
+  // Временно отключите debug на время калибровки (можно включить потом)
+  // SimpleFOCDebug::enable(&Serial);   // ← закомментируйте на время теста
 
   sensor.init();
-  motor.linkSensor(&sensor);
+  motor.linkSensor(&sensor);               // сначала сырой датчик
 
   driver.voltage_power_supply = POWER_SUPPLY;
   driver.init();
   motor.linkDriver(&driver);
 
-  // Режим
-  // motor.controller = MotionControlType::velocity;
+  // Режим управления
   motor.linkCustomMotionControl(stage2MotionControl);
   motor.controller = MotionControlType::custom;
-
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
-  // Стартовые мягкие настройки для малых скоростей
+  // PID и лимиты
   motor.PID_velocity.P = 0.15f;
   motor.PID_velocity.I = 3.0f;
   motor.PID_velocity.D = 0.0f;
   motor.PID_velocity.output_ramp = 300.0f;
   motor.PID_velocity.limit = VOLTAGE_LIMIT;
-
   motor.LPF_velocity.Tf = 0.02f;
   motor.voltage_limit = VOLTAGE_LIMIT;
   motor.velocity_limit = 20.0f;
@@ -160,10 +148,25 @@ void setup() {
   lowSpeed.setParams(8.0f, 0.08f, 0.30f);
   lowSpeed.setFriction(0.0f, 0.0f, 0.15f);
 
-#if MOTOR_IS_CALIBRATED
-  motor.zero_electric_angle = zero_electric_angle_calibrated;
-  motor.sensor_direction = sensor_direction_calibrated;
-#endif
+  // ===================== КРИТИЧНО: motor.init() ПЕРЕД calibrate =====================
+  motor.useMonitoring(Serial);             // лучше после init, но можно здесь
+  motor.init();                            // ← обязательно до calibrate
+
+  #if MOTOR_IS_CALIBRATED
+    // Уже откалибровано — просто задаём значения
+    motor.zero_electric_angle = zero_electric_angle_calibrated;
+    motor.sensor_direction = sensor_direction_calibrated;
+    motor.linkSensor(&sensor_calibrated);  // переключаемся на калиброванный
+    motor.initFOC();                       // выравнивание пропускается
+  #else
+    // Калибровка
+    // sensor_calibrated.voltage_calibration = 3.0f;  // при необходимости уменьшить
+    sensor_calibrated.calibrate(motor);    // теперь безопасно
+
+    // После калибровки переключаемся
+    motor.linkSensor(&sensor_calibrated);
+    motor.initFOC();                       // или можно не вызывать, если calibrate уже сделал
+  #endif
 
   motor.useMonitoring(Serial);
   motor.init();
