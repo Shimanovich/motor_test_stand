@@ -1,17 +1,21 @@
+/**
+ * Этап 1: плавное управление BLDC на минимальных скоростях
+ */
 
 #include <SimpleFOC.h>
+#include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
 
-#include "VelocityDobController.h"
+#include "LowSpeedVelocityController.h"
 #include "config.h"
-#include "encoders/calibrated/CalibratedSensor.h"
 
+// ===================== Железо =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
-
 BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
 BLDCDriver3PWM driver =
     BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
+// ===================== Калибровка =====================
 #define MOTOR_IS_CALIBRATED 1
 
 float calibrationLut[100] = {
@@ -31,7 +35,7 @@ float calibrationLut[100] = {
     0.001937,  0.001937,  0.000551,  0.000551,  0.000551,  -0.000835, -0.000835,
     -0.000835, -0.000688};
 
-float zero_electric_angle_calibrated = 0.268594;
+float zero_electric_angle_calibrated = 0.268594f;
 Direction sensor_direction_calibrated = Direction::CW;
 
 #if MOTOR_IS_CALIBRATED
@@ -41,44 +45,59 @@ CalibratedSensor sensor_calibrated =
 CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, 100);
 #endif
 
+// ===================== Управление =====================
 volatile float target_velocity = 0.0f;
-
-#define configTICK_RATE_HZ ((TickType_t)10000)
-
 int powerOn = 0;
 
-// Экземпляр регулятора
-VelocityDobController controller;                     // сам объект
-VelocityDobController* controller_ptr = &controller;  // указатель для  обёртки
+LowSpeedVelocityController lowSpeed;
 
-float customMotionControlWrapper(FOCMotor* motor) {
-  return (*controller_ptr)(motor);  // вызываем operator()
-}
-
-// Commander
+// ===================== Commander =====================
 Commander command = Commander(Serial1);
+
+// --- Основные ---
 void doTarget(char* cmd) { command.scalar((float*)&target_velocity, cmd); }
-void doKp(char* cmd) { command.scalar(&controller.kp(), cmd); }
-void doKi(char* cmd) { command.scalar(&controller.ki(), cmd); }
-void doBn(char* cmd) { command.scalar(&controller.bn(), cmd); }
-void doG(char* cmd) { command.scalar(&controller.g(), cmd); }
-void dottf(char* cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }
 
 void doPower(char* cmd) {
   float in;
   command.scalar(&in, cmd);
   powerOn = (int)in;
+  if (!powerOn) {
+    target_velocity = 0.0f;
+    lowSpeed.reset();
+  }
 }
 
-// FreeRTOS задача 1 кГц
+// --- PID скорости ---
+void doP(char* cmd) { command.scalar(&motor.PID_velocity.P, cmd); }
+void doI(char* cmd) { command.scalar(&motor.PID_velocity.I, cmd); }
+void doD(char* cmd) { command.scalar(&motor.PID_velocity.D, cmd); }
+void doRamp(char* cmd) { command.scalar(&motor.PID_velocity.output_ramp, cmd); }
+
+// --- Фильтры и ограничения ---
+void doTf(char* cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }
+void doVLim(char* cmd) {
+  command.scalar(&motor.voltage_limit, cmd);
+  motor.PID_velocity.limit = motor.voltage_limit;
+}
+void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
+
+// --- Сглаживание задания (LowSpeed) ---
+void doAccel(char* cmd) { command.scalar(&lowSpeed.maxAccel(), cmd); }
+void doDead(char* cmd) { command.scalar(&lowSpeed.deadzone(), cmd); }
+void doSoft(char* cmd) { command.scalar(&lowSpeed.softZone(), cmd); }
+
+// ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   const TickType_t xFrequency = 1;
 
   for (;;) {
     if (powerOn) {
+      float smooth_target = lowSpeed.process(target_velocity);
       motor.loopFOC();
-      motor.move(target_velocity);
+      motor.move(smooth_target);
+    } else {
+      motor.move(0);
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -89,7 +108,6 @@ void setup() {
   Serial1.begin(230400, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
   SimpleFOCDebug::enable(&Serial);
 
-  // Железо
   sensor.init();
   motor.linkSensor(&sensor);
 
@@ -97,19 +115,23 @@ void setup() {
   driver.init();
   motor.linkDriver(&driver);
 
-  // Регулятор
-  controller.setPID(0.1f, 1.0f);
-  controller.setDob(0.0f, 0.0f);
-  controller.setFilters(0.018f, 12.0f, 0.10f, 0.35f);
-  controller.setVoltageLimit(VOLTAGE_LIMIT);
-
-  motor.linkCustomMotionControl(customMotionControlWrapper);
-  // motor.controller = MotionControlType::custom;
-  motor.controller = MotionControlType::velocity_openloop;
-
+  // Режим
+  motor.controller = MotionControlType::velocity;
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
+
+  // Стартовые мягкие настройки для малых скоростей
+  motor.PID_velocity.P = 0.15f;
+  motor.PID_velocity.I = 3.0f;
+  motor.PID_velocity.D = 0.0f;
+  motor.PID_velocity.output_ramp = 300.0f;
+  motor.PID_velocity.limit = VOLTAGE_LIMIT;
+
+  motor.LPF_velocity.Tf = 0.02f;
   motor.voltage_limit = VOLTAGE_LIMIT;
+  motor.velocity_limit = 20.0f;
+
+  lowSpeed.setParams(8.0f, 0.08f, 0.30f);
 
 #if MOTOR_IS_CALIBRATED
   motor.zero_electric_angle = zero_electric_angle_calibrated;
@@ -117,34 +139,41 @@ void setup() {
 #endif
 
   motor.useMonitoring(Serial);
-
   motor.init();
-
-  // sensor_calibrated.calibrate(motor);
-
   motor.linkSensor(&sensor_calibrated);
-
   motor.initFOC();
 
-  // Команды
-  command.add('T', doTarget, "target velocity");
-  command.add('P', doKp, "Kp");
-  command.add('I', doKi, "Ki");
-  command.add('B', doBn, "bn");
-  command.add('G', doG, "DOB g");
-  command.add('W', doPower, "ON");
-  command.add('F', dottf, "filter_set");
+  // ========== Все команды Commander ==========
+  command.add('T', doTarget, "target velocity [rad/s]");
+  command.add('W', doPower, "power 0/1");
+
+  command.add('P', doP, "PID P");
+  command.add('I', doI, "PID I");
+  command.add('D', doD, "PID D");
+  command.add('R', doRamp, "PID output_ramp");
+
+  command.add('F', doTf, "LPF velocity Tf");
+  command.add('L', doVLim, "voltage_limit");
+  command.add('V', doVelLim, "velocity_limit");
+
+  command.add('A', doAccel, "max_accel [rad/s^2]");
+  command.add('Z', doDead, "deadzone [rad/s]");
+  command.add('S', doSoft, "soft_zone [rad/s]");
 
   command.verbose = VerboseMode::nothing;
 
-  Serial.println(F("PID + DOB modular version ready"));
-  _delay(1000);
+  Serial.println(F("=== Stage 1: Low-speed closed-loop velocity ==="));
+  Serial.println(
+      F("T-target  W-power  P/I/D/R-PID  F-LPF  L-Vlim  V-velLim  A-accel  "
+        "Z-dead  S-soft"));
+  _delay(500);
 
   xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
-                          0);
+                          1);
 }
 
 void loop() {
   command.run();
-  Serial1.printf("%.3f,%.3f\n", target_velocity, motor.shaft_velocity);
+  Serial1.printf("%.3f,%.3f,%.3f\n", target_velocity, motor.shaft_velocity,
+                 motor.voltage.q);
 }
