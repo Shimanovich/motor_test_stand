@@ -86,6 +86,10 @@ void doAccel(char* cmd) { command.scalar(&lowSpeed.maxAccel(), cmd); }
 void doDead(char* cmd) { command.scalar(&lowSpeed.deadzone(), cmd); }
 void doSoft(char* cmd) { command.scalar(&lowSpeed.softZone(), cmd); }
 
+void doCoulomb(char* cmd) { command.scalar(&lowSpeed.coulomb(), cmd); }
+void doViscous(char* cmd) { command.scalar(&lowSpeed.viscous(), cmd); }
+void doSoftSign(char* cmd) { command.scalar(&lowSpeed.softSign(), cmd); }
+
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -93,14 +97,33 @@ void motorControlTask(void* pvParameters) {
 
   for (;;) {
     if (powerOn) {
-      float smooth_target = lowSpeed.process(target_velocity);
+      last_smooth_target = lowSpeed.process(target_velocity);
       motor.loopFOC();
-      motor.move(smooth_target);
+      motor.move(last_smooth_target);
     } else {
       motor.move(0);
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
+}
+
+// Глобально
+float last_smooth_target = 0.0f;
+
+float stage2MotionControl(FOCMotor* m) {
+  // 1. Ошибка скорости
+  float error = last_smooth_target - m->shaft_velocity;
+
+  // 2. Встроенный PI SimpleFOC можно вызвать вручную,
+  //    но проще использовать свой мини-PI или оставить motor.PID_velocity
+  float u_pid = motor.PID_velocity(error);  // использует P, I, ramp, limit
+
+  // 3. Компенсация трения
+  float u_ff = lowSpeed.frictionCompensation(m->shaft_velocity);
+
+  float u = u_pid + u_ff;
+  u = constrain(u, -m->voltage_limit, m->voltage_limit);
+  return u;
 }
 
 void setup() {
@@ -116,7 +139,10 @@ void setup() {
   motor.linkDriver(&driver);
 
   // Режим
-  motor.controller = MotionControlType::velocity;
+  // motor.controller = MotionControlType::velocity;
+  motor.linkCustomMotionControl(stage2MotionControl);
+  motor.controller = MotionControlType::custom;
+
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
@@ -132,6 +158,7 @@ void setup() {
   motor.velocity_limit = 20.0f;
 
   lowSpeed.setParams(8.0f, 0.08f, 0.30f);
+  lowSpeed.setFriction(0.0f, 0.0f, 0.15f);
 
 #if MOTOR_IS_CALIBRATED
   motor.zero_electric_angle = zero_electric_angle_calibrated;
@@ -159,6 +186,10 @@ void setup() {
   command.add('A', doAccel, "max_accel [rad/s^2]");
   command.add('Z', doDead, "deadzone [rad/s]");
   command.add('S', doSoft, "soft_zone [rad/s]");
+
+  command.add('C', doCoulomb, "coulomb friction [V]");
+  command.add('B', doViscous, "viscous friction [V/(rad/s)]");
+  command.add('N', doSoftSign, "soft sign zone [rad/s]");
 
   command.verbose = VerboseMode::nothing;
 
