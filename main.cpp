@@ -16,15 +16,8 @@ BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
 BLDCDriver3PWM driver =
     BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
-
-
 // ===================== Калибровка =====================
 #define MOTOR_IS_CALIBRATED 1
-
-
-
-
-
 
 #if MOTOR_IS_CALIBRATED
 CalibratedSensor sensor_calibrated =
@@ -100,9 +93,9 @@ void motorControlTask(void* pvParameters) {
 
 // Глобально
 
-// ===================== Фильтр скорости для PI (сильнее, чем LPF SimpleFOC) =====================
-LowPassFilter LPF_vel_ctrl(0.08f);   // 80 мс — критично для 0.2–0.5 рад/с
-
+// ===================== Фильтр скорости для PI (сильнее, чем LPF SimpleFOC)
+// =====================
+LowPassFilter LPF_vel_ctrl(0.08f);  // 80 мс — критично для 0.2–0.5 рад/с
 
 float stage2MotionControl(FOCMotor* m) {
   // Сильно сглаженная скорость только для регулятора
@@ -120,6 +113,7 @@ float stage2MotionControl(FOCMotor* m) {
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
+  // SimpleFOCDebug::enable(&Serial);
 
   sensor.init();
   motor.linkSensor(&sensor);
@@ -143,7 +137,7 @@ void setup() {
   // Фильтр SimpleFOC (для shaft_velocity / телеметрии)
   motor.LPF_velocity.Tf = 0.04f;
 
-  motor.voltage_limit = 4.0f;      // на время отладки низких скоростей
+  motor.voltage_limit = 4.0f;  // на время отладки низких скоростей
   motor.PID_velocity.limit = motor.voltage_limit;
   motor.velocity_limit = 20.0f;
 
@@ -152,6 +146,7 @@ void setup() {
   lowSpeed.setFriction(0.0f, 0.0f, 0.12f);  // трение пока 0
 
   motor.init();
+  motor.useMonitoring(Serial);
 
 #if MOTOR_IS_CALIBRATED
   motor.zero_electric_angle = zero_electric_angle_calibrated;
@@ -182,16 +177,17 @@ void setup() {
   command.add('N', doSoftSign, "soft sign");
 
   // Отдельный фильтр регулятора
-  command.add('E', [](char* cmd) {
-    command.scalar(&LPF_vel_ctrl.Tf, cmd);
-  }, "LPF controller Tf");
+  command.add(
+      'E', [](char* cmd) { command.scalar(&LPF_vel_ctrl.Tf, cmd); },
+      "LPF controller Tf");
 
   command.verbose = VerboseMode::nothing;
 
   Serial.println(F("Low-speed fix: strong LPF + soft PI"));
   _delay(300);
 
-  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
+                          1);
 }
 void loop() {
   command.run();
