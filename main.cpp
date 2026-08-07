@@ -48,14 +48,22 @@ void doPower(char* cmd) {
   }
 }
 
-// --- PID скорости ---
-void doP(char* cmd) { command.scalar(&motor.PID_velocity.P, cmd); }
-void doI(char* cmd) { command.scalar(&motor.PID_velocity.I, cmd); }
-void doD(char* cmd) { command.scalar(&motor.PID_velocity.D, cmd); }
+// // --- PID скорости ---
+// void doP(char* cmd) { command.scalar(&motor.PID_velocity.P, cmd); }
+// void doI(char* cmd) { command.scalar(&motor.PID_velocity.I, cmd); }
+// void doD(char* cmd) { command.scalar(&motor.PID_velocity.D, cmd); }
+
+// --- PID положения ---
+void doP(char* cmd) { command.scalar(&motor.P_angle.P, cmd); }
+void doI(char* cmd) { command.scalar(&motor.P_angle.I, cmd); }
+void doD(char* cmd) { command.scalar(&motor.P_angle.D, cmd); }
+
 void doRamp(char* cmd) { command.scalar(&motor.PID_velocity.output_ramp, cmd); }
 
 // --- Фильтры и ограничения ---
-void doTf(char* cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }
+// void doTf(char* cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }
+void doTf(char* cmd) { command.scalar(&motor.LPF_angle.Tf, cmd); }
+
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
   motor.PID_velocity.limit = motor.voltage_limit;
@@ -71,7 +79,7 @@ void doCoulomb(char* cmd) { command.scalar(&lowSpeed.coulomb(), cmd); }
 void doViscous(char* cmd) { command.scalar(&lowSpeed.viscous(), cmd); }
 void doSoftSign(char* cmd) { command.scalar(&lowSpeed.softSign(), cmd); }
 
-float last_smooth_target = 0.0f;
+double last_smooth_target = 0.0;
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -79,9 +87,12 @@ void motorControlTask(void* pvParameters) {
 
   for (;;) {
     if (powerOn) {
-      last_smooth_target = lowSpeed.process(target_velocity);
+      // last_smooth_target = lowSpeed.process(target_velocity);
+
+      last_smooth_target += (double)target_velocity * 0.001;
+
       motor.loopFOC();
-      motor.move(last_smooth_target);
+      motor.move((float)last_smooth_target);
     } else {
       last_smooth_target = 0.0f;
       lowSpeed.reset();
@@ -124,6 +135,8 @@ void setup() {
 
   motor.linkCustomMotionControl(stage2MotionControl);
   motor.controller = MotionControlType::custom;
+  motor.controller = MotionControlType::angle_nocascade;
+
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
@@ -131,6 +144,11 @@ void setup() {
   motor.PID_velocity.P = 0.08f;
   motor.PID_velocity.I = 0.6f;
   motor.PID_velocity.D = 0.0f;
+
+  motor.P_angle.P = 0.0;
+  motor.P_angle.I = 0.0;
+  motor.P_angle.D = 0.0;
+
   motor.PID_velocity.output_ramp = 120.0f;
   motor.PID_velocity.limit = VOLTAGE_LIMIT;
 
@@ -185,12 +203,24 @@ void setup() {
 
   Serial.println(F("Low-speed fix: strong LPF + soft PI"));
   _delay(300);
+  last_smooth_target = motor.shaftAngle();  // init position
 
   xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
                           1);
 }
 void loop() {
   command.run();
-  Serial1.printf("%.3f,%.3f,%.3f\n", target_velocity, motor.shaft_velocity,
-                 motor.voltage.q);
+
+  float speedOmega;
+  float posOmega;
+  if (motor.controller == MotionControlType::velocity_openloop) {
+    posOmega = motor.shaftAngle();
+    speedOmega = motor.shaftVelocity();
+  } else {
+    speedOmega = motor.shaft_velocity;
+    posOmega = motor.shaft_angle;
+  }
+
+  Serial1.printf("%f,%f,%f,%f,%f\n", target_velocity, speedOmega, posOmega,
+                 motor.voltage.q, last_smooth_target);
 }
