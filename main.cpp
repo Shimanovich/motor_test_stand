@@ -9,6 +9,7 @@
 #include "LowSpeedVelocityController.h"
 #include "config.h"
 #include "luts.h"
+#include <esp_task_wdt.h>
 
 // ===================== Железо =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
@@ -122,6 +123,13 @@ float stage2MotionControl(FOCMotor* m) {
 }
 
 void setup() {
+
+  //disableCore0WDT();
+  //disableCore1WDT();
+  
+
+  delay(100);                     // небольшая пауз
+
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
   // SimpleFOCDebug::enable(&Serial);
@@ -224,3 +232,18 @@ void loop() {
   Serial1.printf("%f,%f,%f,%f,%f\n", target_velocity, speedOmega, posOmega,
                  motor.voltage.q, last_smooth_target);
 }
+
+
+// #include <Arduino.h>
+// void setup() {
+//   Serial.begin(115200);
+//   delay(1000);
+
+  
+//   Serial.print("MAC Address: ");  
+//   Serial.println();
+// }
+
+// void loop() {
+//   // ничего не делаем
+// }
