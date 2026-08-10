@@ -5,11 +5,11 @@
 #include <SimpleFOC.h>
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
+#include <esp_task_wdt.h>
 
-#include "LowSpeedVelocityController.h"
+#include "PositionExtrapolator.h"
 #include "config.h"
 #include "luts.h"
-#include <esp_task_wdt.h>
 
 // ===================== Железо =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
@@ -30,8 +30,10 @@ CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 // ===================== Управление =====================
 volatile float target_velocity = 0.0f;
 int powerOn = 0;
+float pr;
+float lfp_multipler = 1.0;
 
-LowSpeedVelocityController lowSpeed;
+PositionExtrapolator extrap(0.0001 * 2);
 
 // ===================== Commander =====================
 Commander command = Commander(Serial1);
@@ -45,7 +47,6 @@ void doPower(char* cmd) {
   powerOn = (int)in;
   if (!powerOn) {
     target_velocity = 0.0f;
-    lowSpeed.reset();
   }
 }
 
@@ -63,22 +64,13 @@ void doRamp(char* cmd) { command.scalar(&motor.PID_velocity.output_ramp, cmd); }
 
 // --- Фильтры и ограничения ---
 // void doTf(char* cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }
-void doTf(char* cmd) { command.scalar(&motor.LPF_angle.Tf, cmd); }
+void doTf(char* cmd) { command.scalar(&lfp_multipler, cmd); }
 
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
   motor.PID_velocity.limit = motor.voltage_limit;
 }
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
-
-// --- Сглаживание задания (LowSpeed) ---
-void doAccel(char* cmd) { command.scalar(&lowSpeed.maxAccel(), cmd); }
-void doDead(char* cmd) { command.scalar(&lowSpeed.deadzone(), cmd); }
-void doSoft(char* cmd) { command.scalar(&lowSpeed.softZone(), cmd); }
-
-void doCoulomb(char* cmd) { command.scalar(&lowSpeed.coulomb(), cmd); }
-void doViscous(char* cmd) { command.scalar(&lowSpeed.viscous(), cmd); }
-void doSoftSign(char* cmd) { command.scalar(&lowSpeed.softSign(), cmd); }
 
 double last_smooth_target = 0.0;
 // ===================== FreeRTOS задача 1 кГц =====================
@@ -88,47 +80,49 @@ void motorControlTask(void* pvParameters) {
 
   for (;;) {
     if (powerOn) {
-      // last_smooth_target = lowSpeed.process(target_velocity);
-
       last_smooth_target += (double)target_velocity * 0.001;
 
       motor.loopFOC();
       motor.move((float)last_smooth_target);
     } else {
       last_smooth_target = 0.0f;
-      lowSpeed.reset();
       motor.move(0);
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
 
-// Глобально
-
-// ===================== Фильтр скорости для PI (сильнее, чем LPF SimpleFOC)
-// =====================
-LowPassFilter LPF_vel_ctrl(0.08f);  // 80 мс — критично для 0.2–0.5 рад/с
-
 float stage2MotionControl(FOCMotor* m) {
-  // Сильно сглаженная скорость только для регулятора
-  float y = LPF_vel_ctrl(m->shaft_velocity);
+  static float old_target = 0.0f;
+  double old_t, new_t;
 
-  float error = last_smooth_target - y;
+  new_t = (double)_micros() * 1e-6;
 
-  float u_pid = motor.PID_velocity(error);
-  float u_ff = lowSpeed.frictionCompensation(y);
+  if (old_target != m->shaft_angle) {
+    extrap.setTcorr((new_t - old_t) * motor.LPF_velocity.Tf);
+    extrap.addMeasurement(m->shaft_angle, new_t);
+    old_target = m->shaft_angle;
 
-  float u = u_pid + u_ff;
-  return constrain(u, -m->voltage_limit, m->voltage_limit);
+    m->LPF_angle.Tf = lfp_multipler / (new_t - old_t);
+
+    old_t = new_t;
+  }
+
+  // pr = extrap.predict(new_t);
+  pr = m->LPF_angle(m->shaft_angle);
+
+  m->shaft_angle_sp = m->target;
+
+  // calculate the torque command - sensor precision: this calculation is ok,
+  // but based on bad value from previous calculation
+  return motor.P_angle(m->shaft_angle_sp - pr);
 }
 
 void setup() {
+  // disableCore0WDT();
+  // disableCore1WDT();
 
-  //disableCore0WDT();
-  //disableCore1WDT();
-  
-
-  delay(100);                     // небольшая пауз
+  delay(100);  // небольшая пауз
 
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
@@ -143,7 +137,7 @@ void setup() {
 
   motor.linkCustomMotionControl(stage2MotionControl);
   motor.controller = MotionControlType::custom;
-  motor.controller = MotionControlType::angle_nocascade;
+  // motor.controller = MotionControlType::angle_nocascade;
 
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
@@ -166,10 +160,6 @@ void setup() {
   motor.voltage_limit = 4.0f;  // на время отладки низких скоростей
   motor.PID_velocity.limit = motor.voltage_limit;
   motor.velocity_limit = 20.0f;
-
-  // Зоны: 0.26 не должно «ломаться» soft-зоной
-  lowSpeed.setParams(5.0f, 0.04f, 0.12f);   // accel, deadzone, soft_zone
-  lowSpeed.setFriction(0.0f, 0.0f, 0.12f);  // трение пока 0
 
   motor.init();
   motor.useMonitoring(Serial);
@@ -195,17 +185,6 @@ void setup() {
   command.add('F', doTf, "LPF SimpleFOC Tf");
   command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
-  command.add('A', doAccel, "max_accel");
-  command.add('Z', doDead, "deadzone");
-  command.add('S', doSoft, "soft_zone");
-  command.add('C', doCoulomb, "coulomb");
-  command.add('B', doViscous, "viscous");
-  command.add('N', doSoftSign, "soft sign");
-
-  // Отдельный фильтр регулятора
-  command.add(
-      'E', [](char* cmd) { command.scalar(&LPF_vel_ctrl.Tf, cmd); },
-      "LPF controller Tf");
 
   command.verbose = VerboseMode::nothing;
 
@@ -229,21 +208,6 @@ void loop() {
     posOmega = motor.shaft_angle;
   }
 
-  Serial1.printf("%f,%f,%f,%f,%f\n", target_velocity, speedOmega, posOmega,
-                 motor.voltage.q, last_smooth_target);
+  Serial1.printf("%f,%f,%f,%f,%f,%f\n", target_velocity, speedOmega, posOmega,
+                 motor.voltage.q, last_smooth_target, pr);
 }
-
-
-// #include <Arduino.h>
-// void setup() {
-//   Serial.begin(115200);
-//   delay(1000);
-
-  
-//   Serial.print("MAC Address: ");  
-//   Serial.println();
-// }
-
-// void loop() {
-//   // ничего не делаем
-// }
