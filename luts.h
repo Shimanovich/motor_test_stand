@@ -312,6 +312,5 @@ float calibrationLut[LUTS_TOTAL] = {
     -0.000559, -0.000559};
 
 float zero_electric_angle_calibrated = 0.367574;
-;
 Direction sensor_direction_calibrated = Direction::CW;
 #endif

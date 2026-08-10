@@ -32,4 +32,4 @@
 
 // Управление
 #define CONTROL_HZ 1000
-#define CONTROL_DT 0.001f
+#define CONTROL_DT 0.001

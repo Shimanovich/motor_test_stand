@@ -1,13 +1,13 @@
 /**
- * Этап 1: плавное управление BLDC на минимальных скоростях
+ * Плавное управление BLDC на минимальных скоростях
+ * EncoderObserver (α-β) + position control через custom motion
  */
 
 #include <SimpleFOC.h>
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
-#include <esp_task_wdt.h>
 
-#include "PositionExtrapolator.h"
+#include "EncoderObserver.h"
 #include "config.h"
 #include "luts.h"
 
@@ -30,15 +30,13 @@ CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 // ===================== Управление =====================
 volatile float target_velocity = 0.0f;
 int powerOn = 0;
-float pr;
-float lfp_multipler = 1.0;
 
-PositionExtrapolator extrap(0.0001 * 2);
+double position_setpoint = 0.0f;          // интегрированное задание
+EncoderObserver observer(0.15f, 0.008f); // α, β
 
 // ===================== Commander =====================
 Commander command = Commander(Serial1);
 
-// --- Основные ---
 void doTarget(char* cmd) { command.scalar((float*)&target_velocity, cmd); }
 
 void doPower(char* cmd) {
@@ -50,21 +48,10 @@ void doPower(char* cmd) {
   }
 }
 
-// // --- PID скорости ---
-// void doP(char* cmd) { command.scalar(&motor.PID_velocity.P, cmd); }
-// void doI(char* cmd) { command.scalar(&motor.PID_velocity.I, cmd); }
-// void doD(char* cmd) { command.scalar(&motor.PID_velocity.D, cmd); }
-
-// --- PID положения ---
+// PID положения
 void doP(char* cmd) { command.scalar(&motor.P_angle.P, cmd); }
 void doI(char* cmd) { command.scalar(&motor.P_angle.I, cmd); }
 void doD(char* cmd) { command.scalar(&motor.P_angle.D, cmd); }
-
-void doRamp(char* cmd) { command.scalar(&motor.PID_velocity.output_ramp, cmd); }
-
-// --- Фильтры и ограничения ---
-// void doTf(char* cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }
-void doTf(char* cmd) { command.scalar(&lfp_multipler, cmd); }
 
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
@@ -72,61 +59,47 @@ void doVLim(char* cmd) {
 }
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
-double last_smooth_target = 0.0;
+// Gains наблюдателя
+void doAlpha(char* cmd) { command.scalar(&observer.alpha(), cmd); }
+void doBeta(char* cmd)  { command.scalar(&observer.beta(),  cmd); }
+
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = 1;
+  const TickType_t xFrequency = 1;   // 1 ms
 
   for (;;) {
     if (powerOn) {
-      last_smooth_target += (double)target_velocity * 0.001;
-
+      position_setpoint += (double)target_velocity * CONTROL_DT;
       motor.loopFOC();
-      motor.move((float)last_smooth_target);
+      motor.move((float)position_setpoint);
     } else {
-      last_smooth_target = 0.0f;
-      motor.move(0);
+      motor.move((float)position_setpoint);  // держим текущее положение
+      // или motor.move(0) + observer.reset(...) — по вкусу
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
 
+// ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
-  static float old_target = 0.0f;
-  double old_t, new_t;
+  float t = _micros() * 1e-6f;          // или использовать монотонный счётчик
 
-  new_t = (double)_micros() * 1e-6;
+  observer.predict(CONTROL_DT);
+  observer.update(m->shaft_angle, t);   // сам решит, новое это измерение или нет
 
-  if (old_target != m->shaft_angle) {
-    extrap.setTcorr((new_t - old_t) * lfp_multipler);
-    extrap.addMeasurement(m->shaft_angle, new_t);
-    old_target = m->shaft_angle;
+  float error = m->target - observer.position();
+  float u = motor.P_angle(error);
 
-    //m->LPF_angle.Tf = lfp_multipler / (new_t - old_t);
-
-    old_t = new_t;
-  }
-
-   pr = extrap.predict(new_t);
-  //pr = m->LPF_angle(m->shaft_angle);
-
-  m->shaft_angle_sp = m->target;
-
-  // calculate the torque command - sensor precision: this calculation is ok,
-  // but based on bad value from previous calculation
-  return motor.P_angle(m->shaft_angle_sp - m->shaft_angle);
+  return constrain(u, -m->voltage_limit, m->voltage_limit);
 }
 
+// ===================== Setup =====================
 void setup() {
-  // disableCore0WDT();
-  // disableCore1WDT();
-
-  delay(100);  // небольшая пауз
+  delay(100);
 
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
-  // SimpleFOCDebug::enable(&Serial);
 
   sensor.init();
   motor.linkSensor(&sensor);
@@ -137,32 +110,20 @@ void setup() {
 
   motor.linkCustomMotionControl(stage2MotionControl);
   motor.controller = MotionControlType::custom;
-  // motor.controller = MotionControlType::angle_nocascade;
-
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
-  // ---- Мягкий PID под малые скорости ----
-  motor.PID_velocity.P = 0.08f;
-  motor.PID_velocity.I = 0.6f;
-  motor.PID_velocity.D = 0.0f;
+  // Мягкий регулятор положения
+  motor.P_angle.P = 5.0f;
+  motor.P_angle.I = 0.0f;
+  motor.P_angle.D = 0.0f;
 
-  motor.P_angle.P = 0.0;
-  motor.P_angle.I = 0.0;
-  motor.P_angle.D = 0.0;
-
-  motor.PID_velocity.output_ramp = 120.0f;
-  motor.PID_velocity.limit = VOLTAGE_LIMIT;
-
-  // Фильтр SimpleFOC (для shaft_velocity / телеметрии)
-  motor.LPF_velocity.Tf = 0.04f;
-
-  motor.voltage_limit = 4.0f;  // на время отладки низких скоростей
+  motor.voltage_limit = 4.0f;
   motor.PID_velocity.limit = motor.voltage_limit;
   motor.velocity_limit = 20.0f;
+  motor.LPF_velocity.Tf = 0.04f;
 
   motor.init();
-  motor.useMonitoring(Serial);
 
 #if MOTOR_IS_CALIBRATED
   motor.zero_electric_angle = zero_electric_angle_calibrated;
@@ -175,39 +136,38 @@ void setup() {
   motor.initFOC();
 #endif
 
+  // Инициализация наблюдателя текущим положением
+  position_setpoint = (double)motor.shaft_angle;
+  observer.reset(motor.shaft_angle, 0.0f);
+
   // Commander
   command.add('T', doTarget, "target velocity [rad/s]");
-  command.add('W', doPower, "power 0/1");
-  command.add('P', doP, "PID P");
-  command.add('I', doI, "PID I");
-  command.add('D', doD, "PID D");
-  command.add('R', doRamp, "PID output_ramp");
-  command.add('F', doTf, "LPF SimpleFOC Tf");
-  command.add('L', doVLim, "voltage_limit");
+  command.add('W', doPower,  "power 0/1");
+  command.add('P', doP,      "P_angle.P");
+  command.add('I', doI,      "P_angle.I");
+  command.add('D', doD,      "P_angle.D");
+  command.add('L', doVLim,   "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
+  command.add('A', doAlpha,  "observer alpha");
+  command.add('B', doBeta,   "observer beta");
 
   command.verbose = VerboseMode::nothing;
 
-  Serial.println(F("Low-speed fix: strong LPF + soft PI"));
-  _delay(300);
-  last_smooth_target = motor.shaftAngle();  // init position
+  Serial.println(F("EncoderObserver (alpha-beta) ready"));
+  _delay(200);
 
-  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
-                          1);
+  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL, 1);
 }
+
+// ===================== Loop (телеметрия) =====================
 void loop() {
   command.run();
 
-  float speedOmega;
-  float posOmega;
-  if (motor.controller == MotionControlType::velocity_openloop) {
-    posOmega = motor.shaftAngle();
-    speedOmega = motor.shaftVelocity();
-  } else {
-    speedOmega = motor.shaft_velocity;
-    posOmega = motor.shaft_angle;
-  }
-
-  Serial1.printf("%f,%f,%f,%f,%f,%f\n", target_velocity, speedOmega, posOmega,
-                 motor.voltage.q, last_smooth_target, pr);
+  Serial1.printf("%f,%f,%f,%f,%f,%f\n",
+                 target_velocity,
+                 observer.velocity(),
+                 observer.position(),
+                 motor.shaft_angle,
+                 motor.voltage.q,
+                 (float)position_setpoint);
 }
