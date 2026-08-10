@@ -99,23 +99,23 @@ float stage2MotionControl(FOCMotor* m) {
   new_t = (double)_micros() * 1e-6;
 
   if (old_target != m->shaft_angle) {
-    extrap.setTcorr((new_t - old_t) * motor.LPF_velocity.Tf);
+    extrap.setTcorr((new_t - old_t) * lfp_multipler);
     extrap.addMeasurement(m->shaft_angle, new_t);
     old_target = m->shaft_angle;
 
-    m->LPF_angle.Tf = lfp_multipler / (new_t - old_t);
+    //m->LPF_angle.Tf = lfp_multipler / (new_t - old_t);
 
     old_t = new_t;
   }
 
-  // pr = extrap.predict(new_t);
-  pr = m->LPF_angle(m->shaft_angle);
+   pr = extrap.predict(new_t);
+  //pr = m->LPF_angle(m->shaft_angle);
 
   m->shaft_angle_sp = m->target;
 
   // calculate the torque command - sensor precision: this calculation is ok,
   // but based on bad value from previous calculation
-  return motor.P_angle(m->shaft_angle_sp - pr);
+  return motor.P_angle(m->shaft_angle_sp - m->shaft_angle);
 }
 
 void setup() {
