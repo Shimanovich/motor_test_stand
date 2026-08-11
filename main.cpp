@@ -1,14 +1,13 @@
 /**
  * Плавное управление BLDC на минимальных скоростях
- * EncoderObserver (α-β) + position control через custom motion
+ * KalmanEncoder (1D CV) + position control через custom motion
  */
 
 #include <SimpleFOC.h>
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
 
-// #include "EncoderObserver.h"
-#include "SoftSnapObserver.h"
+#include "KalmanEncoder.h"
 #include "config.h"
 #include "luts.h"
 
@@ -32,10 +31,10 @@ CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 volatile float target_velocity = 0.0f;
 int powerOn = 0;
 
-double position_setpoint = 0.0f;  // интегрированное задание
-// EncoderObserver observer(0.15f, 0.008f);  // α, β
+double position_setpoint = 0.0;
 
-SoftSnapObserver observer(0.25f);  // tau = 0.25 с
+// q_pos, q_vel, r — стартовые значения для MT6701 @ 1 kHz
+KalmanEncoder observer(1e-7f, 5e-4f, 2e-6f);
 
 // ===================== Commander =====================
 Commander command = Commander(Serial1);
@@ -49,8 +48,9 @@ void doPower(char* cmd) {
   if (!powerOn) {
     target_velocity = 0.0f;
     motor.disable();
+  } else {
+    motor.enable();
   }
-  motor.enable();
 }
 
 // PID положения
@@ -64,9 +64,10 @@ void doVLim(char* cmd) {
 }
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
-// Gains наблюдателя
-// void doAlpha(char* cmd) { command.scalar(&observer.tau(), cmd); }
-// void doBeta(char* cmd) { command.scalar(&observer.beta(), cmd); }
+// Kalman noise parameters
+void doQpos(char* cmd) { command.scalar(&observer.qPos(), cmd); }
+void doQvel(char* cmd) { command.scalar(&observer.qVel(), cmd); }
+void doR(char* cmd) { command.scalar(&observer.r(), cmd); }
 
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
@@ -78,9 +79,6 @@ void motorControlTask(void* pvParameters) {
       position_setpoint += (double)target_velocity * CONTROL_DT;
       motor.loopFOC();
       motor.move((float)position_setpoint);
-    } else {
-      // motor.move((float)position_setpoint);  // держим текущее положение
-      //  или motor.move(0) + observer.reset(...) — по вкусу
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -94,16 +92,28 @@ float stage2MotionControl(FOCMotor* m) {
   if (dt <= 0.0f || dt > 0.01f) dt = CONTROL_DT;
   t_prev = t;
 
+  // 1. Prediction
   observer.predict(dt, target_velocity);
-  observer.update(m->shaft_angle, t);  // ← передаём время
-  observer.smooth(dt);
 
+  // 2. Correction (only on new encoder LSB)
+  observer.update(m->shaft_angle);
+
+  // 3. Position error
   float error = m->target - observer.position();
 
-  const float dead = 0.0004f;
+  // 4. Small deadzone against residual quantization
+  const float dead = 0.0004f;  // ~1 LSB of MT6701
   if (fabsf(error) < dead) error = 0.0f;
 
-  return constrain(motor.P_angle(error), -m->voltage_limit, m->voltage_limit);
+  // 5. Optional mild gain scheduling by speed
+  float speed = fabsf(target_velocity);
+  float P_low = 0.6f;
+  float P_high = 4.0f;
+  motor.P_angle.P = P_low + (P_high - P_low) * constrain(speed / 1.0f, 0.0f, 1.0f);
+  // I stays as set by Commander (recommend 0 at ultra-low speeds)
+
+  float u = motor.P_angle(error);
+  return constrain(u, -m->voltage_limit, m->voltage_limit);
 }
 
 // ===================== Setup =====================
@@ -125,8 +135,8 @@ void setup() {
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
-  // Мягкий регулятор положения
-  motor.P_angle.P = 5.0f;
+  // Soft position regulator defaults (will be gain-scheduled online)
+  motor.P_angle.P = 0.8f;
   motor.P_angle.I = 0.0f;
   motor.P_angle.D = 0.0f;
 
@@ -148,7 +158,7 @@ void setup() {
   motor.initFOC();
 #endif
 
-  // Инициализация наблюдателя текущим положением
+  // Init observer at current angle
   position_setpoint = (double)motor.shaft_angle;
   observer.reset(motor.shaft_angle, 0.0f);
   observer.setQuantization(2.0f * PI / 16384.0f);
@@ -161,12 +171,13 @@ void setup() {
   command.add('D', doD, "P_angle.D");
   command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
-  // command.add('A', doAlpha, "observer alpha");
-  //  command.add('B', doBeta, "observer beta");
+  command.add('Q', doQpos, "Kalman q_pos");
+  command.add('U', doQvel, "Kalman q_vel");
+  command.add('R', doR, "Kalman r");
 
   command.verbose = VerboseMode::nothing;
 
-  Serial.println(F("EncoderObserver (alpha-beta) ready"));
+  Serial.println(F("KalmanEncoder ready"));
   _delay(200);
 
   xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
