@@ -48,7 +48,9 @@ void doPower(char* cmd) {
   powerOn = (int)in;
   if (!powerOn) {
     target_velocity = 0.0f;
+    motor.disable();
   }
+  motor.enable();
 }
 
 // PID положения
@@ -63,7 +65,7 @@ void doVLim(char* cmd) {
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
 // Gains наблюдателя
-void doAlpha(char* cmd) { command.scalar(&observer.tau(), cmd); }
+// void doAlpha(char* cmd) { command.scalar(&observer.tau(), cmd); }
 // void doBeta(char* cmd) { command.scalar(&observer.beta(), cmd); }
 
 // ===================== FreeRTOS задача 1 кГц =====================
@@ -73,12 +75,10 @@ void motorControlTask(void* pvParameters) {
 
   for (;;) {
     if (powerOn) {
-      motor.enable();
       position_setpoint += (double)target_velocity * CONTROL_DT;
       motor.loopFOC();
       motor.move((float)position_setpoint);
     } else {
-      motor.disable();
       // motor.move((float)position_setpoint);  // держим текущее положение
       //  или motor.move(0) + observer.reset(...) — по вкусу
     }
@@ -94,24 +94,16 @@ float stage2MotionControl(FOCMotor* m) {
   if (dt <= 0.0f || dt > 0.01f) dt = CONTROL_DT;
   t_prev = t;
 
-  // 1. Предсказание
   observer.predict(dt, target_velocity);
-
-  // 2. Новое измерение (если есть)
-  observer.update(m->shaft_angle);
-
-  // 3. Мягкая коррекция
+  observer.update(m->shaft_angle, t);  // ← передаём время
   observer.smooth(dt);
 
-  // 4. Ошибка
   float error = m->target - observer.position();
 
-  // 5. Небольшой deadzone
   const float dead = 0.0004f;
   if (fabsf(error) < dead) error = 0.0f;
 
-  float u = motor.P_angle(error);
-  return constrain(u, -m->voltage_limit, m->voltage_limit);
+  return constrain(motor.P_angle(error), -m->voltage_limit, m->voltage_limit);
 }
 
 // ===================== Setup =====================
@@ -169,8 +161,8 @@ void setup() {
   command.add('D', doD, "P_angle.D");
   command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
-  command.add('A', doAlpha, "observer alpha");
-  // command.add('B', doBeta, "observer beta");
+  // command.add('A', doAlpha, "observer alpha");
+  //  command.add('B', doBeta, "observer beta");
 
   command.verbose = VerboseMode::nothing;
 
