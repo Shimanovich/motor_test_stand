@@ -2,7 +2,7 @@
 
 // Пины
 
-#if 1
+#if 0
 #define CUSTOM_RX_PIN 16
 #define CUSTOM_TX_PIN 17
 #define SENSOR_CS_PIN 5
@@ -12,7 +12,7 @@
 #define DRIVER_EN 27
 #endif
 
-#if 0
+#if 1
 #define CUSTOM_RX_PIN 16
 #define CUSTOM_TX_PIN 17
 #define SENSOR_CS_PIN 5

@@ -32,7 +32,7 @@ volatile float target_velocity = 0.0f;
 int powerOn = 0;
 
 double position_setpoint = 0.0f;          // интегрированное задание
-EncoderObserver observer(0.15f, 0.008f); // α, β
+EncoderObserver observer(0.15f, 0.008f);  // α, β
 
 // ===================== Commander =====================
 Commander command = Commander(Serial1);
@@ -61,12 +61,12 @@ void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
 // Gains наблюдателя
 void doAlpha(char* cmd) { command.scalar(&observer.alpha(), cmd); }
-void doBeta(char* cmd)  { command.scalar(&observer.beta(),  cmd); }
+void doBeta(char* cmd) { command.scalar(&observer.beta(), cmd); }
 
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = 1;   // 1 ms
+  const TickType_t xFrequency = 1;  // 1 ms
 
   for (;;) {
     if (powerOn) {
@@ -83,12 +83,26 @@ void motorControlTask(void* pvParameters) {
 
 // ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
-  float t = _micros() * 1e-6f;          // или использовать монотонный счётчик
+  static float t_prev = 0.0f;
+  float t = _micros() * 1e-6f;
+  float dt = t - t_prev;
+  if (dt <= 0.0f || dt > 0.01f) dt = CONTROL_DT;  // защита
+  t_prev = t;
 
-  observer.predict(CONTROL_DT);
-  observer.update(m->shaft_angle, t);   // сам решит, новое это измерение или нет
+  // 1. Предсказание с сильным влиянием задания (критично на 0.0001 рад/с)
+  observer.predict(dt, target_velocity);  // см. обновлённый predict ниже
 
+  // 2. Коррекция только при реальном изменении энкодера
+  observer.update(m->shaft_angle, t);
+
+  // 3. Ошибка положения
   float error = m->target - observer.position();
+
+  // 4. Небольшой deadzone (1 LSB), чтобы ступеньки не били в регулятор
+  const float dead = 0.0004f;  // ≈ 1 LSB MT6701
+  if (fabsf(error) < dead) error = 0.0f;
+
+  // 5. Регулятор
   float u = motor.P_angle(error);
 
   return constrain(u, -m->voltage_limit, m->voltage_limit);
@@ -139,35 +153,33 @@ void setup() {
   // Инициализация наблюдателя текущим положением
   position_setpoint = (double)motor.shaft_angle;
   observer.reset(motor.shaft_angle, 0.0f);
+  observer.setQuantization(2.0f * PI / 16384.0f);
 
   // Commander
   command.add('T', doTarget, "target velocity [rad/s]");
-  command.add('W', doPower,  "power 0/1");
-  command.add('P', doP,      "P_angle.P");
-  command.add('I', doI,      "P_angle.I");
-  command.add('D', doD,      "P_angle.D");
-  command.add('L', doVLim,   "voltage_limit");
+  command.add('W', doPower, "power 0/1");
+  command.add('P', doP, "P_angle.P");
+  command.add('I', doI, "P_angle.I");
+  command.add('D', doD, "P_angle.D");
+  command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
-  command.add('A', doAlpha,  "observer alpha");
-  command.add('B', doBeta,   "observer beta");
+  command.add('A', doAlpha, "observer alpha");
+  command.add('B', doBeta, "observer beta");
 
   command.verbose = VerboseMode::nothing;
 
   Serial.println(F("EncoderObserver (alpha-beta) ready"));
   _delay(200);
 
-  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
+                          1);
 }
 
 // ===================== Loop (телеметрия) =====================
 void loop() {
   command.run();
 
-  Serial1.printf("%f,%f,%f,%f,%f,%f\n",
-                 target_velocity,
-                 observer.velocity(),
-                 observer.position(),
-                 motor.shaft_angle,
-                 motor.voltage.q,
+  Serial1.printf("%f,%f,%f,%f,%f,%f\n", target_velocity, observer.velocity(),
+                 observer.position(), motor.shaft_angle, motor.voltage.q,
                  (float)position_setpoint);
 }

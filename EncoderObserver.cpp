@@ -1,6 +1,8 @@
 // EncoderObserver.cpp
 #include "EncoderObserver.h"
+
 #include <Arduino.h>
+
 #include <cmath>
 
 EncoderObserver::EncoderObserver(float alpha, float beta) {
@@ -9,7 +11,7 @@ EncoderObserver::EncoderObserver(float alpha, float beta) {
 
 void EncoderObserver::setGains(float alpha, float beta) {
   alpha_ = constrain(alpha, 0.0f, 1.0f);
-  beta_  = constrain(beta,  0.0f, 1.0f);
+  beta_ = constrain(beta, 0.0f, 1.0f);
 }
 
 void EncoderObserver::setQuantization(float quant_rad) {
@@ -24,9 +26,10 @@ void EncoderObserver::reset(float angle, float velocity) {
   initialized_ = true;
 }
 
-void EncoderObserver::predict(float dt) {
+void EncoderObserver::predict(float dt, float cmd_vel) {
   if (!initialized_ || dt <= 0.0f) return;
-  pos_ += vel_ * dt;
+  float v = 0.85f * cmd_vel + 0.15f * vel_;
+  pos_ += v * dt;
 }
 
 void EncoderObserver::update(float measured_angle, float t) {
@@ -54,7 +57,7 @@ void EncoderObserver::update(float measured_angle, float t) {
 
   // === Новое измерение ===
   float dt_change = t - t_last_change_;
-  if (dt_change < 1e-4f) dt_change = CONTROL_DT; // защита
+  if (dt_change < 1e-4f) dt_change = CONTROL_DT;  // защита
 
   // 1. Оценка скорости по времени между скачками (главное на малых скоростях)
   float vel_from_jump = delta / dt_change;
@@ -62,14 +65,16 @@ void EncoderObserver::update(float measured_angle, float t) {
   // 2. Residual относительно текущей оценки
   float residual = measured_angle - pos_;
 
-  // 3. Коррекция положения
-  pos_ += alpha_ * residual;
+  // Ограничиваем максимальный residual за один шаг
+  float max_corr = 3.0f * quant_;  // не больше 3 LSB за раз
+  residual = constrain(residual, -max_corr, max_corr);
 
-  // 4. Коррекция скорости: смесь β-фильтра и прямого измерения скачка
-  //    (чем реже скачки — тем сильнее доверяем vel_from_jump)
-  float trust_jump = constrain(dt_change / 0.05f, 0.0f, 1.0f); // 50 мс → полный вес
-  vel_ = (1.0f - trust_jump) * (vel_ + (beta_ / CONTROL_DT) * residual)
-       + trust_jump * vel_from_jump;
+  // Очень слабая коррекция
+  pos_ += 0.01f * residual;  // фиксированно маленькая
+
+  // Скорость — только сильно отфильтрованная
+  float vel_jump = delta / max(dt_change, 0.05f);
+  vel_ = 0.995f * vel_ + 0.005f * vel_jump;
 
   // Запоминаем
   last_meas_ = measured_angle;
