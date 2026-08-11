@@ -7,7 +7,8 @@
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
 
-#include "EncoderObserver.h"
+// #include "EncoderObserver.h"
+#include "SoftSnapObserver.h"
 #include "config.h"
 #include "luts.h"
 
@@ -31,8 +32,10 @@ CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 volatile float target_velocity = 0.0f;
 int powerOn = 0;
 
-double position_setpoint = 0.0f;          // интегрированное задание
-EncoderObserver observer(0.15f, 0.008f);  // α, β
+double position_setpoint = 0.0f;  // интегрированное задание
+// EncoderObserver observer(0.15f, 0.008f);  // α, β
+
+SoftSnapObserver observer(0.25f);  // tau = 0.25 с
 
 // ===================== Commander =====================
 Commander command = Commander(Serial1);
@@ -60,8 +63,8 @@ void doVLim(char* cmd) {
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
 // Gains наблюдателя
-void doAlpha(char* cmd) { command.scalar(&observer.alpha(), cmd); }
-void doBeta(char* cmd) { command.scalar(&observer.beta(), cmd); }
+void doAlpha(char* cmd) { command.scalar(&observer.tau(), cmd); }
+// void doBeta(char* cmd) { command.scalar(&observer.beta(), cmd); }
 
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
@@ -70,12 +73,14 @@ void motorControlTask(void* pvParameters) {
 
   for (;;) {
     if (powerOn) {
+      motor.enable();
       position_setpoint += (double)target_velocity * CONTROL_DT;
       motor.loopFOC();
       motor.move((float)position_setpoint);
     } else {
-      motor.move((float)position_setpoint);  // держим текущее положение
-      // или motor.move(0) + observer.reset(...) — по вкусу
+      motor.disable();
+      // motor.move((float)position_setpoint);  // держим текущее положение
+      //  или motor.move(0) + observer.reset(...) — по вкусу
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -86,25 +91,26 @@ float stage2MotionControl(FOCMotor* m) {
   static float t_prev = 0.0f;
   float t = _micros() * 1e-6f;
   float dt = t - t_prev;
-  if (dt <= 0.0f || dt > 0.01f) dt = CONTROL_DT;  // защита
+  if (dt <= 0.0f || dt > 0.01f) dt = CONTROL_DT;
   t_prev = t;
 
-  // 1. Предсказание с сильным влиянием задания (критично на 0.0001 рад/с)
-  observer.predict(dt, target_velocity);  // см. обновлённый predict ниже
+  // 1. Предсказание
+  observer.predict(dt, target_velocity);
 
-  // 2. Коррекция только при реальном изменении энкодера
-  observer.update(m->shaft_angle, t);
+  // 2. Новое измерение (если есть)
+  observer.update(m->shaft_angle);
 
-  // 3. Ошибка положения
+  // 3. Мягкая коррекция
+  observer.smooth(dt);
+
+  // 4. Ошибка
   float error = m->target - observer.position();
 
-  // 4. Небольшой deadzone (1 LSB), чтобы ступеньки не били в регулятор
-  const float dead = 0.0004f;  // ≈ 1 LSB MT6701
+  // 5. Небольшой deadzone
+  const float dead = 0.0004f;
   if (fabsf(error) < dead) error = 0.0f;
 
-  // 5. Регулятор
   float u = motor.P_angle(error);
-
   return constrain(u, -m->voltage_limit, m->voltage_limit);
 }
 
@@ -164,7 +170,7 @@ void setup() {
   command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
   command.add('A', doAlpha, "observer alpha");
-  command.add('B', doBeta, "observer beta");
+  // command.add('B', doBeta, "observer beta");
 
   command.verbose = VerboseMode::nothing;
 
