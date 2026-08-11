@@ -65,9 +65,18 @@ void doVLim(char* cmd) {
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
 // Kalman noise parameters
-void doQpos(char* cmd) { command.scalar(&observer.qPos(), cmd); }
-void doQvel(char* cmd) { command.scalar(&observer.qVel(), cmd); }
-void doR(char* cmd) { command.scalar(&observer.r(), cmd); }
+void doQpos(char* cmd) {
+  command.scalar(&observer.qPos(), cmd);
+  observer.qPos() *= 1000.0;
+}
+void doQvel(char* cmd) {
+  command.scalar(&observer.qVel(), cmd);
+  observer.qVel() *= 1000.0;
+}
+void doR(char* cmd) {
+  command.scalar(&observer.r(), cmd);
+  observer.r() *= 1000.0;
+}
 
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
@@ -109,7 +118,8 @@ float stage2MotionControl(FOCMotor* m) {
   float speed = fabsf(target_velocity);
   float P_low = 0.6f;
   float P_high = 4.0f;
-  motor.P_angle.P = P_low + (P_high - P_low) * constrain(speed / 1.0f, 0.0f, 1.0f);
+  motor.P_angle.P =
+      P_low + (P_high - P_low) * constrain(speed / 1.0f, 0.0f, 1.0f);
   // I stays as set by Commander (recommend 0 at ultra-low speeds)
 
   float u = motor.P_angle(error);
