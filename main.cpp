@@ -7,9 +7,10 @@
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
 
-#include "KalmanEncoder.h"
+// #include "KalmanEncoder.h"
 #include "config.h"
 #include "luts.h"
+#include "newLfp.h"
 
 // ===================== Железо =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
@@ -33,8 +34,16 @@ int powerOn = 0;
 
 double position_setpoint = 0.0;
 
+NewLowPassFilter lfp(0.002);
+
+float filtred = 0.0;
+
+float multipler = 1.0;
+
+float filter2dval = 0.0f;
+
 // q_pos, q_vel, r — стартовые значения для MT6701 @ 1 kHz
-KalmanEncoder observer(1e-7f, 5e-4f, 2e-6f);
+// KalmanEncoder observer(1e-7f, 5e-4f, 2e-6f);
 
 // ===================== Commander =====================
 Commander command = Commander(Serial1);
@@ -66,17 +75,21 @@ void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
 // Kalman noise parameters
 void doQpos(char* cmd) {
-  command.scalar(&observer.qPos(), cmd);
-  observer.qPos() *= 1000.0;
+  // command.scalar(&observer.qPos(), cmd);
+  // observer.qPos() /= 1000.0;
 }
 void doQvel(char* cmd) {
-  command.scalar(&observer.qVel(), cmd);
-  observer.qVel() *= 1000.0;
+  // command.scalar(&observer.qVel(), cmd);
+  // observer.qVel() /= 1000.0;
 }
 void doR(char* cmd) {
-  command.scalar(&observer.r(), cmd);
-  observer.r() *= 1000.0;
+  // command.scalar(&observer.r(), cmd);
+  // observer.r() /= 1000.0;
 }
+
+void doLfp(char* cmd) { command.scalar(&motor.LPF_angle.Tf, cmd); }
+
+void doLfp2(char* cmd) { command.scalar(&multipler, cmd); }
 
 // ===================== FreeRTOS задача 1 кГц =====================
 void motorControlTask(void* pvParameters) {
@@ -96,34 +109,49 @@ void motorControlTask(void* pvParameters) {
 // ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
   static float t_prev = 0.0f;
-  float t = _micros() * 1e-6f;
-  float dt = t - t_prev;
-  if (dt <= 0.0f || dt > 0.01f) dt = CONTROL_DT;
-  t_prev = t;
+  // // 1. Prediction
+  // // observer.predict(dt, target_velocity);
 
-  // 1. Prediction
-  observer.predict(dt, target_velocity);
+  // // 2. Correction (only on new encoder LSB)
+  // // observer.update(m->shaft_angle);
 
-  // 2. Correction (only on new encoder LSB)
-  observer.update(m->shaft_angle);
+  // // 3. Position error
+  // float error = m->target - observer.position();
 
-  // 3. Position error
-  float error = m->target - observer.position();
+  // // 4. Small deadzone against residual quantization
+  // const float dead = 0.0004f;  // ~1 LSB of MT6701
+  // if (fabsf(error) < dead) error = 0.0f;
 
-  // 4. Small deadzone against residual quantization
-  const float dead = 0.0004f;  // ~1 LSB of MT6701
-  if (fabsf(error) < dead) error = 0.0f;
+  // // 5. Optional mild gain scheduling by speed
+  // float speed = fabsf(target_velocity);
+  // float P_low = 0.6f;
+  // float P_high = 4.0f;
+  // motor.P_angle.P =
+  //     P_low + (P_high - P_low) * constrain(speed / 1.0f, 0.0f, 1.0f);
+  // // I stays as set by Commander (recommend 0 at ultra-low speeds)
 
-  // 5. Optional mild gain scheduling by speed
-  float speed = fabsf(target_velocity);
-  float P_low = 0.6f;
-  float P_high = 4.0f;
-  motor.P_angle.P =
-      P_low + (P_high - P_low) * constrain(speed / 1.0f, 0.0f, 1.0f);
-  // I stays as set by Commander (recommend 0 at ultra-low speeds)
+  // float u = motor.P_angle(error);
+  // return constrain(u, -m->voltage_limit, m->voltage_limit);
 
-  float u = motor.P_angle(error);
-  return constrain(u, -m->voltage_limit, m->voltage_limit);
+  static float old_pos = 0.0f;
+
+  if (m->shaft_angle != old_pos) {
+    float t = _micros() * 1e-6f;
+    float dt = t - t_prev;
+    *lfp.getTauPtr() = dt * multipler;
+    lfp.update((float)m->shaft_angle, (float)_micros() * 1e-6f);
+    old_pos = m->shaft_angle;
+    t_prev = t;
+  }
+
+  m->shaft_angle_sp = m->target;
+
+  filtred = m->LPF_angle(m->shaft_angle);
+
+  filter2dval = (float)lfp.valueAt((float)_micros() * 1e-6f);
+  // calculate the torque command - sensor precision: this calculation
+  // is ok, but based on bad value from previous calculation
+  return m->P_angle(m->shaft_angle_sp - filter2dval);
 }
 
 // ===================== Setup =====================
@@ -153,7 +181,7 @@ void setup() {
   motor.voltage_limit = 4.0f;
   motor.PID_velocity.limit = motor.voltage_limit;
   motor.velocity_limit = 20.0f;
-  motor.LPF_velocity.Tf = 0.04f;
+  // motor.LPF_velocity.Tf = 0.04f;
 
   motor.init();
 
@@ -170,8 +198,8 @@ void setup() {
 
   // Init observer at current angle
   position_setpoint = (double)motor.shaft_angle;
-  observer.reset(motor.shaft_angle, 0.0f);
-  observer.setQuantization(2.0f * PI / 16384.0f);
+  // observer.reset(motor.shaft_angle, 0.0f);
+  // observer.setQuantization(2.0f * PI / 16384.0f);
 
   // Commander
   command.add('T', doTarget, "target velocity [rad/s]");
@@ -184,6 +212,8 @@ void setup() {
   command.add('Q', doQpos, "Kalman q_pos");
   command.add('U', doQvel, "Kalman q_vel");
   command.add('R', doR, "Kalman r");
+  command.add('F', doLfp, "FilTER");
+  command.add('J', doLfp2, "FilTER");
 
   command.verbose = VerboseMode::nothing;
 
@@ -198,7 +228,7 @@ void setup() {
 void loop() {
   command.run();
 
-  Serial1.printf("%f,%f,%f,%f,%f,%f\n", target_velocity, observer.velocity(),
-                 observer.position(), motor.shaft_angle, motor.voltage.q,
-                 (float)position_setpoint);
+  Serial1.printf("%f,%f,%f,%f,%f,%f\n", target_velocity, motor.shaft_angle,
+                 motor.voltage.q, (float)position_setpoint, filtred,
+                 filter2dval);
 }
