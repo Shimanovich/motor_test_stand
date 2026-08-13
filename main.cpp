@@ -114,33 +114,19 @@ void motorControlTask(void* pvParameters) {
 
 // ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
-  // Передаём текущую целевую скорость в фильтр
-  // (чтобы он мог мягко притягивать оценку velocity)
   sensor_extrap.setCommandVelocity(target_velocity);
 
-  // Позиция уже экстраполирована внутри sensor_extrap.update(),
-  // который вызвал loopFOC()
-  float pos = m->shaft_angle;  // ← это уже отфильтрованное значение
-
+  float pos = m->shaft_angle;  // уже отфильтрованное
   m->shaft_angle_sp = m->target;
 
   float error = m->shaft_angle_sp - pos;
 
-  // Мёртвая зона против остаточной квантизации
-  const float dead = 0.0004f;
+  // Меньшая deadzone или убрать совсем после смягчения коррекции
+  const float dead = 0.0002f;
   if (fabsf(error) < dead) error = 0.0f;
 
   float u = m->P_angle(error);
   return constrain(u, -m->voltage_limit, m->voltage_limit);
-
-#if 0 
-  m->shaft_angle_sp = m->target;
-  filtred = m->LPF_angle(m->shaft_angle);
-
-  // calculate the torque command - sensor precision: this calculation
-  // is ok, but based on bad value from previous calculation
-  return m->P_angle(m->shaft_angle_sp - filtred);
-#endif
 }
 
 // ===================== Setup =====================
