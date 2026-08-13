@@ -114,37 +114,22 @@ void motorControlTask(void* pvParameters) {
 
 // ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
-  // 1. Время
-  static float t_prev = 0.0f;
-  float t = _micros() * 1e-6f;
-  float dt = t - t_prev;
-  if (dt <= 0.0f || dt > 0.05f) dt = CONTROL_DT;  // защита
-  t_prev = t;
+  // Передаём текущую целевую скорость в фильтр
+  // (чтобы он мог мягко притягивать оценку velocity)
+  sensor_extrap.setCommandVelocity(target_velocity);
 
-  // 2. Предсказание (экстраполяция)
-  //    target_velocity — глобальная переменная из Commander
-  sensor_extrap.predict(dt, target_velocity);
+  // Позиция уже экстраполирована внутри sensor_extrap.update(),
+  // который вызвал loopFOC()
+  float pos = m->shaft_angle;  // ← это уже отфильтрованное значение
 
-  // 3. Получаем сглаженную/экстраполированную позицию
-  //    (getAngle() внутри вызовет getSensorAngle() нашего фильтра)
-  float pos = sensor_extrap.getAngle();
+  m->shaft_angle_sp = m->target;
 
-  // 4. Целевая позиция
-  m->shaft_angle_sp = m->target;  // position_setpoint приходит через move()
-
-  // 5. Ошибка положения
   float error = m->shaft_angle_sp - pos;
 
-  // 6. Небольшая мёртвая зона против остаточной квантизации
-  //    (~1 LSB MT6701)
+  // Мёртвая зона против остаточной квантизации
   const float dead = 0.0004f;
   if (fabsf(error) < dead) error = 0.0f;
 
-  // 7. (Опционально) мягкое изменение P в зависимости от скорости
-  // float speed = fabsf(target_velocity);
-  // motor.P_angle.P = 0.6f + 3.4f * constrain(speed / 1.0f, 0.0f, 1.0f);
-
-  // 8. Регулятор положения → напряжение
   float u = m->P_angle(error);
   return constrain(u, -m->voltage_limit, m->voltage_limit);
 
