@@ -128,9 +128,20 @@ float stage2MotionControl(FOCMotor* m) {
   // float u = m->P_angle(error);
   // return constrain(u, -m->voltage_limit, m->voltage_limit);
 
-  m->shaft_angle_sp = m->target;
-  filtred = m->LPF_angle(m->shaft_angle);
-  return m->P_angle(m->shaft_angle_sp - filtred);
+  // m->shaft_angle_sp = m->target;
+  // filtred = m->LPF_angle(m->shaft_angle);
+  // return m->P_angle(m->shaft_angle_sp - filtred);
+
+  static float cur_out = 0;
+  float oldshaft_angle;
+
+  if (oldshaft_angle != m->shaft_angle) {
+    m->shaft_angle_sp = m->target;
+    filtred = m->shaft_angle;
+    cur_out = m->LPF_angle(m->P_angle(m->shaft_angle_sp - filtred));
+    oldshaft_angle = m->shaft_angle;
+  }
+  return cur_out;
 }
 
 // ===================== Setup =====================
