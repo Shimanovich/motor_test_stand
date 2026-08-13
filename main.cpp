@@ -143,15 +143,15 @@ float stage2MotionControl(FOCMotor* m) {
     old_pos = m->shaft_angle;
     t_prev = t;
   }
+  filter2dval = (float)lfp.valueAt((float)_micros() * 1e-6f);
 
   m->shaft_angle_sp = m->target;
 
   filtred = m->LPF_angle(m->shaft_angle);
 
-  filter2dval = (float)lfp.valueAt((float)_micros() * 1e-6f);
   // calculate the torque command - sensor precision: this calculation
   // is ok, but based on bad value from previous calculation
-  return m->P_angle(m->shaft_angle_sp - filter2dval);
+  return m->P_angle(m->shaft_angle_sp - filtred);
 }
 
 // ===================== Setup =====================
@@ -228,7 +228,7 @@ void setup() {
 void loop() {
   command.run();
 
-  Serial1.printf("%f,%f,%f,%f,%f,%f\n", target_velocity, motor.shaft_angle,
+  Serial1.printf("%f,%f,%f,%f,%f,%f,%f\n", target_velocity, motor.shaft_angle,
                  motor.voltage.q, (float)position_setpoint, filtred,
-                 filter2dval);
+                 filter2dval, motor.shaft_velocity);
 }
