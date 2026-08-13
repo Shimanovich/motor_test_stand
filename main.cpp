@@ -8,6 +8,8 @@
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
 
 // #include "KalmanEncoder.h"
+// #include "SmoothedSensor.h"
+#include "ExtrapolatingSensor.h"
 #include "config.h"
 #include "luts.h"
 #include "newLfp.h"
@@ -27,6 +29,10 @@ CalibratedSensor sensor_calibrated =
 #else
 CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 #endif
+
+// SmoothedSensor sensor_filtred = SmoothedSensor(sensor_calibrated);
+
+ExtrapolatingSensor sensor_extrap = ExtrapolatingSensor(sensor_calibrated);
 
 // ===================== Управление =====================
 volatile float target_velocity = 0.0f;
@@ -108,50 +114,48 @@ void motorControlTask(void* pvParameters) {
 
 // ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
+  // 1. Время
   static float t_prev = 0.0f;
-  // // 1. Prediction
-  // // observer.predict(dt, target_velocity);
+  float t = _micros() * 1e-6f;
+  float dt = t - t_prev;
+  if (dt <= 0.0f || dt > 0.05f) dt = CONTROL_DT;  // защита
+  t_prev = t;
 
-  // // 2. Correction (only on new encoder LSB)
-  // // observer.update(m->shaft_angle);
+  // 2. Предсказание (экстраполяция)
+  //    target_velocity — глобальная переменная из Commander
+  sensor_extrap.predict(dt, target_velocity);
 
-  // // 3. Position error
-  // float error = m->target - observer.position();
+  // 3. Получаем сглаженную/экстраполированную позицию
+  //    (getAngle() внутри вызовет getSensorAngle() нашего фильтра)
+  float pos = sensor_extrap.getAngle();
 
-  // // 4. Small deadzone against residual quantization
-  // const float dead = 0.0004f;  // ~1 LSB of MT6701
-  // if (fabsf(error) < dead) error = 0.0f;
+  // 4. Целевая позиция
+  m->shaft_angle_sp = m->target;  // position_setpoint приходит через move()
 
-  // // 5. Optional mild gain scheduling by speed
+  // 5. Ошибка положения
+  float error = m->shaft_angle_sp - pos;
+
+  // 6. Небольшая мёртвая зона против остаточной квантизации
+  //    (~1 LSB MT6701)
+  const float dead = 0.0004f;
+  if (fabsf(error) < dead) error = 0.0f;
+
+  // 7. (Опционально) мягкое изменение P в зависимости от скорости
   // float speed = fabsf(target_velocity);
-  // float P_low = 0.6f;
-  // float P_high = 4.0f;
-  // motor.P_angle.P =
-  //     P_low + (P_high - P_low) * constrain(speed / 1.0f, 0.0f, 1.0f);
-  // // I stays as set by Commander (recommend 0 at ultra-low speeds)
+  // motor.P_angle.P = 0.6f + 3.4f * constrain(speed / 1.0f, 0.0f, 1.0f);
 
-  // float u = motor.P_angle(error);
-  // return constrain(u, -m->voltage_limit, m->voltage_limit);
+  // 8. Регулятор положения → напряжение
+  float u = m->P_angle(error);
+  return constrain(u, -m->voltage_limit, m->voltage_limit);
 
-  static float old_pos = 0.0f;
-
-  if (m->shaft_angle != old_pos) {
-    float t = _micros() * 1e-6f;
-    float dt = t - t_prev;
-    *lfp.getTauPtr() = dt * multipler;
-    lfp.update((float)m->shaft_angle, (float)_micros() * 1e-6f);
-    old_pos = m->shaft_angle;
-    t_prev = t;
-  }
-  filter2dval = (float)lfp.valueAt((float)_micros() * 1e-6f);
-
+#if 0 
   m->shaft_angle_sp = m->target;
-
   filtred = m->LPF_angle(m->shaft_angle);
 
   // calculate the torque command - sensor precision: this calculation
   // is ok, but based on bad value from previous calculation
   return m->P_angle(m->shaft_angle_sp - filtred);
+#endif
 }
 
 // ===================== Setup =====================
@@ -162,6 +166,7 @@ void setup() {
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
 
   sensor.init();
+
   motor.linkSensor(&sensor);
 
   driver.voltage_power_supply = POWER_SUPPLY;
@@ -188,7 +193,8 @@ void setup() {
 #if MOTOR_IS_CALIBRATED
   motor.zero_electric_angle = zero_electric_angle_calibrated;
   motor.sensor_direction = sensor_direction_calibrated;
-  motor.linkSensor(&sensor_calibrated);
+  motor.linkSensor(&sensor_extrap);
+  // motor.linkSensor(&sensor_calibrated);
   motor.initFOC();
 #else
   sensor_calibrated.calibrate(motor);
@@ -228,7 +234,8 @@ void setup() {
 void loop() {
   command.run();
 
-  Serial1.printf("%f,%f,%f,%f,%f,%f,%f\n", target_velocity, motor.shaft_angle,
-                 motor.voltage.q, (float)position_setpoint, filtred,
-                 filter2dval, motor.shaft_velocity);
+  Serial1.printf("%f,%f,%f,%f,%f,%f,%f,%f\n", target_velocity,
+                 motor.shaft_angle, motor.voltage.q, (float)position_setpoint,
+                 filtred, filter2dval, motor.shaft_velocity,
+                 (float)_micros() * 1e-6f);
 }
