@@ -67,7 +67,7 @@ class ExtrapolatingSensor : public Sensor {
   }
 
   void init() override {
-    _wrapped.init();  // на всякий случай
+    //_wrapped.init();  // на всякий случай
     Sensor::init();
     t_prev_ = _micros() * 1e-6f;
     initialized_ =

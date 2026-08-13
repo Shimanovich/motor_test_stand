@@ -114,19 +114,23 @@ void motorControlTask(void* pvParameters) {
 
 // ===================== Custom motion control =====================
 float stage2MotionControl(FOCMotor* m) {
-  sensor_extrap.setCommandVelocity(target_velocity);
+  // sensor_extrap.setCommandVelocity(target_velocity);
 
-  float pos = m->shaft_angle;  // уже отфильтрованное
+  // float pos = m->shaft_angle;  // уже отфильтрованное
+  // m->shaft_angle_sp = m->target;
+
+  // float error = m->shaft_angle_sp - pos;
+
+  // // Меньшая deadzone или убрать совсем после смягчения коррекции
+  // const float dead = 0.0002f;
+  // if (fabsf(error) < dead) error = 0.0f;
+
+  // float u = m->P_angle(error);
+  // return constrain(u, -m->voltage_limit, m->voltage_limit);
+
   m->shaft_angle_sp = m->target;
-
-  float error = m->shaft_angle_sp - pos;
-
-  // Меньшая deadzone или убрать совсем после смягчения коррекции
-  const float dead = 0.0002f;
-  if (fabsf(error) < dead) error = 0.0f;
-
-  float u = m->P_angle(error);
-  return constrain(u, -m->voltage_limit, m->voltage_limit);
+  filtred = m->LPF_angle(m->shaft_angle);
+  return m->P_angle(m->shaft_angle_sp - filtred);
 }
 
 // ===================== Setup =====================
@@ -164,8 +168,8 @@ void setup() {
 #if MOTOR_IS_CALIBRATED
   motor.zero_electric_angle = zero_electric_angle_calibrated;
   motor.sensor_direction = sensor_direction_calibrated;
-  motor.linkSensor(&sensor_extrap);
-  // motor.linkSensor(&sensor_calibrated);
+  // motor.linkSensor(&sensor_extrap);
+  motor.linkSensor(&sensor_calibrated);
   motor.initFOC();
 #else
   sensor_calibrated.calibrate(motor);
