@@ -34,6 +34,9 @@ float filtred = 0.0;
 
 float filter2dval = 0.0f;
 
+float tmp_speed = 0.0f;
+PIDController gyro_pid = PIDController(1.0f, 0.0f, 0.0f, 0.0f, 20.0f);
+
 Commander command = Commander(Serial1);
 
 /**
@@ -94,6 +97,14 @@ void doPower(char* cmd) {
 void doP(char* cmd) { command.scalar(&motor.P_angle.P, cmd); }
 void doI(char* cmd) { command.scalar(&motor.P_angle.I, cmd); }
 void doD(char* cmd) { command.scalar(&motor.P_angle.D, cmd); }
+
+void doGyroP(char* cmd) { command.scalar(&gyro_pid.P, cmd); }
+void doGyroI(char* cmd) { command.scalar(&gyro_pid.I, cmd); }
+void doGyroD(char* cmd) { command.scalar(&gyro_pid.D, cmd); }
+
+void doGyroP(char* cmd) { command.scalar(&gyro_pid.P, cmd); }
+void doGyroI(char* cmd) { command.scalar(&gyro_pid.I, cmd); }
+void doGyroD(char* cmd) { command.scalar(&gyro_pid.D, cmd); }
 
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
