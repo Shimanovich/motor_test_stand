@@ -4,7 +4,7 @@
 #include <common/base_classes/Sensor.h>
 
 // home bldc
-#if 0  
+#if 1  
 float calibrationLut[LUTS_TOTAL] = {
     0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,
     0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,
@@ -160,7 +160,7 @@ Direction sensor_direction_calibrated = Direction::CW;
 #endif
 
 // bldc at work
-#if 1
+#if 0
 
 float calibrationLut[LUTS_TOTAL] = {
     -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559,
