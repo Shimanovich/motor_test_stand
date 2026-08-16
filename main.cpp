@@ -32,7 +32,7 @@ BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
 // ===================== Регуляторы =====================
-PIDController rate_pid(0.45f, 1.2f, 0.001f, 1000.0f, 4.0f);  // P, I, D, ramp, limit
+PIDController rate_pid(0.09f, 4.2f, 0.0f, 1000.0f, 4.0f);  // P, I, D, ramp, limit
 LowPassFilter rate_lpf(0.008f);                               // Tf = 8 мс
 
 // Внешняя команда скорости (пока 0)
@@ -128,6 +128,7 @@ void controlTask(void* pvParameters) {
     platform_rate = (gp[2] - platform_gyro_bias) * 0.017453292519943f;
     frame_rate    = (gf[2] - frame_gyro_bias)    * 0.017453292519943f;
     relative_rate = platform_rate - frame_rate;
+
 
     relative_rate = rate_lpf(relative_rate);
 
