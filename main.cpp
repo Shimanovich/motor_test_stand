@@ -1,108 +1,59 @@
 #include <SimpleFOC.h>
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
+#include <Wire.h>
 
 #include "config.h"
 #include "luts.h"
 #include "icm20602.h"
-#include "Wire.h"
 
-
+// ===================== Датчики =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
-BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
-BLDCDriver3PWM driver =
-    BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
 #define MOTOR_IS_CALIBRATED 1
 
 #if MOTOR_IS_CALIBRATED
-CalibratedSensor sensor_calibrated =
-    CalibratedSensor(sensor, LUTS_TOTAL, calibrationLut);
+CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL, calibrationLut);
 #else
 CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 #endif
 
-ICM20602 imu;
+// IMU
+ICM20602 imu_platform;                 // на платформе (Wire)
+TwoWire I2C_frame = TwoWire(1);        // второй контроллер
+ICM20602 imu_frame;                    // на раме (Wire1, пины 25/26)
 
-volatile float target_velocity = 0.0f;
+// Bias
+float platform_gyro_bias = 0.0f;
+float frame_gyro_bias    = 0.0f;
+
+// ===================== Мотор =====================
+BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
+BLDCDriver3PWM driver = BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
+
+// ===================== Регуляторы =====================
+PIDController rate_pid(0.45f, 1.2f, 0.001f, 1000.0f, 4.0f);  // P, I, D, ramp, limit
+LowPassFilter rate_lpf(0.008f);                               // Tf = 8 мс
+
+// Внешняя команда скорости (пока 0)
+volatile float external_speed_cmd = 0.0f;
+
+// Состояние
 volatile int powerOn = 0;
 
-double position_setpoint = 0.0;
+float relative_rate = 0.0f; 
+float platform_rate = 0.0f;
+float frame_rate = 0.0f;
 
-
-float filtred = 0.0;
-
-float filter2dval = 0.0f;
-
-float tmp_speed = 0.0f;
-PIDController gyro_pid = PIDController(1.0f, 0.0f, 0.0f, 0.0f, 20.0f);
-LowPassFilter gyro_lpf = LowPassFilter(0.0f);
-
-// Состояние кастомного регулятора: должно сбрасываться при включении,
-// иначе после disable/enable на фазы уходит прошлое напряжение.
-float motion_out = 0.0f;
-float motion_old_shaft_angle = NAN;
-
+// Commander
 Commander command = Commander(Serial1);
 
-/**
- * Сканирует I2C-шину и выводит найденные устройства в Serial.
- * @return количество найденных устройств
- */
-uint8_t scanI2C() {
-  uint8_t error;
-  uint8_t address;
-  uint8_t nDevices = 0;
-
-  Serial.println(F("Сканирование I2C..."));
-
-  for (address = 1; address < 127; address++) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-
-    if (error == 0) {
-      Serial.print(F("Найдено: 0x"));
-      if (address < 16) Serial.print('0');
-      Serial.println(address, HEX);
-      nDevices++;
-    }
-    else if (error == 4) {
-      Serial.print(F("Ошибка на адресе 0x"));
-      if (address < 16) Serial.print('0');
-      Serial.println(address, HEX);
-    }
-  }
-
-  if (nDevices == 0) {
-    Serial.println(F("Устройства не найдены"));
-  } else {
-    Serial.print(F("Всего найдено: "));
-    Serial.println(nDevices);
-  }
-
-  Serial.println();
-  return nDevices;
-}
-
-void doTarget(char* cmd) { command.scalar((float*)&target_velocity, cmd); }
-
-// Только силовая команда. Гироскоп не трогаем — его поток нужен и при выключенном моторе.
+// ===================== Вспомогательные функции =====================
 void zeroMotorVoltage() {
-  motor.P_angle.reset();
-  motor.PID_velocity.reset();
   motor.current_sp = 0.0f;
   motor.voltage.q = 0.0f;
   motor.voltage.d = 0.0f;
-  motion_out = 0.0f;
-  motion_old_shaft_angle = NAN;
-}
-
-void syncSetpointToRotor() {
-  if (motor.sensor) motor.sensor->update();
-  motor.shaft_angle = motor.shaftAngle();
-  motor.electrical_angle = motor.electricalAngle();
-  position_setpoint = (double)motor.shaft_angle;
-  motor.target = motor.shaft_angle;
+  rate_pid.reset();
 }
 
 void doPower(char* cmd) {
@@ -116,129 +67,136 @@ void doPower(char* cmd) {
     return;
   }
 
-  powerOn = 0;
   zeroMotorVoltage();
-  syncSetpointToRotor();
-
   motor.enable();
-  // enable() ставит PWM 0/0/0; сразу выставляем Uq=0 (центрированная синусоида),
-  // иначе первый loopFOC() из задачи применит старый current_sp.
-  motor.current_sp = 0.0f;
-  motor.setPhaseVoltage(0.0f, 0.0f, motor.electrical_angle);
-
   powerOn = 1;
 }
 
-void doP(char* cmd) { command.scalar(&motor.P_angle.P, cmd); }
-void doI(char* cmd) { command.scalar(&motor.P_angle.I, cmd); }
-void doD(char* cmd) { command.scalar(&motor.P_angle.D, cmd); }
-
-void doGyroP(char* cmd) { command.scalar(&gyro_pid.P, cmd); }
-void doGyroI(char* cmd) { command.scalar(&gyro_pid.I, cmd); }
-void doGyroD(char* cmd) { command.scalar(&gyro_pid.D, cmd); }
-
+void doRateP(char* cmd) { command.scalar(&rate_pid.P, cmd); }
+void doRateI(char* cmd) { command.scalar(&rate_pid.I, cmd); }
+void doRateD(char* cmd) { command.scalar(&rate_pid.D, cmd); }
+void doRateLpf(char* cmd) { command.scalar(&rate_lpf.Tf, cmd); }
+void doSpeedCmd(char* cmd) { command.scalar((float*)&external_speed_cmd, cmd); }
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
-  motor.PID_velocity.limit = motor.voltage_limit;
-  motor.P_angle.limit = motor.voltage_limit;
+  rate_pid.limit = motor.voltage_limit;
 }
-void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
-void doLfp(char* cmd) { command.scalar(&motor.LPF_angle.Tf, cmd); }
-void doGyroLpf(char* cmd) { command.scalar(&gyro_lpf.Tf, cmd); }
+// ===================== Bias-калибровка =====================
+void calibrateGyroBias() {
+  Serial.println(F("=== Bias calibration ==="));
+  Serial.println(F("Hold platform COMPLETELY still for 2 seconds!"));
 
-void motorControlTask(void* pvParameters) {
+  const int samples = 2000;
+  float sum_p = 0.0f;
+  float sum_f = 0.0f;
+
+  for (int i = 0; i < samples; i++) {
+    float gp[3], ap[3], tp;
+    float gf[3], af[3], tf;
+
+    imu_platform.read(gp, ap, &tp);
+    imu_frame.read(gf, af, &tf);
+
+    sum_p += gp[2];
+    sum_f += gf[2];
+    delay(1);
+  }
+
+  platform_gyro_bias = sum_p / samples;
+  frame_gyro_bias    = sum_f / samples;
+
+  Serial.printf("Platform gyro bias Z: %.4f deg/s\n", platform_gyro_bias);
+  Serial.printf("Frame gyro bias Z:    %.4f deg/s\n", frame_gyro_bias);
+  Serial.println(F("Bias calibration done."));
+}
+
+// ===================== Основная задача управления (1 кГц) =====================
+void controlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = 1;
+  const TickType_t xFrequency = 1;   // 1 мс → 1 кГц
 
   for (;;) {
+    // ----- 1. Чтение IMU -----
+    float gp[3], ap[3], tp;
+    float gf[3], af[3], tf;
+
+    imu_platform.read(gp, ap, &tp);
+    imu_frame.read(gf, af, &tf);
+
+    // ----- 2. Relative rate (рад/с) -----
+    platform_rate = (gp[2] - platform_gyro_bias) * 0.017453292519943f;
+    frame_rate    = (gf[2] - frame_gyro_bias)    * 0.017453292519943f;
+    relative_rate = platform_rate - frame_rate;
+
+    relative_rate = rate_lpf(relative_rate);
+
+    // ----- 3. Rate PID -----
+    // external_speed_cmd пока = 0 → удержание relative_rate = 0
+    float rate_error = external_speed_cmd - relative_rate;
+    float u = rate_pid(rate_error);
+
+    // ----- 4. Мотор -----
     if (powerOn) {
-      position_setpoint += (double)target_velocity * CONTROL_DT;
       motor.loopFOC();
-      motor.move((float)position_setpoint);
-    } else if (motor.sensor) {
-      motor.sensor->update();
-      motor.shaft_angle = motor.shaftAngle();
-      motor.shaft_velocity = motor.shaftVelocity();
+      motor.move(u);               // в torque-режиме это voltage.q
+    } else {
+      // просто обновляем датчик
+      if (motor.sensor) {
+        motor.sensor->update();
+        motor.shaft_angle = motor.shaftAngle();
+        motor.shaft_velocity = motor.shaftVelocity();
+      }
     }
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
-  }
-}
-
-void GyroTask(void* pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = 1;
-
-  for (;;) {
-    float gyro[3], accel[3], temp;
-    imu.read(gyro, accel, &temp);
-    tmp_speed = -gyro[2] * 0.0174533f; // rad/s
-    tmp_speed = gyro_lpf(tmp_speed);
-    target_velocity = gyro_pid(tmp_speed);
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
 
-float stage2MotionControl(FOCMotor* m) {
-  m->shaft_angle_sp = m->target;
-
-  if (isnan(motion_old_shaft_angle) || motion_old_shaft_angle != m->shaft_angle) {
-    filtred = m->shaft_angle;
-    motion_out = m->P_angle(m->shaft_angle_sp - filtred);
-    motion_old_shaft_angle = m->shaft_angle;
-  }
-  return motion_out;
-}
-
+// ===================== Setup =====================
 void setup() {
+  delay(200);
 
-  
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
 
-  Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK );        // SDA=21, SCL=22 по умолчанию
+  // ----- I2C -----
+  Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK);                        // платформа
+  I2C_frame.begin(FRAME_SDA_PIN, FRAME_SCL_PIN, I2C_FRAME_CLOCK); // рама 25/26
 
-  scanI2C();
+  // ----- IMU -----
+  Serial.println(F("Init platform IMU..."));
+  if (imu_platform.begin(0x68, &Wire) != ICM20602_OK) {
+    Serial.println(F("Platform ICM20602 FAILED"));
+    while (true) delay(1000);
+  }
+  Serial.println(F("Platform IMU OK"));
 
-  int8_t status = imu.begin(0x68);   // или 0x69, если AD0 = VCC
-    if (status != ICM20602_OK) {
-        Serial.printf("ICM20602 init failed: %d\n", status);
-        while (true) delay(1000);
-    }
-    Serial.println("ICM20602 OK mode 1");
+  Serial.println(F("Init frame IMU..."));
+  if (imu_frame.begin(0x68, &I2C_frame) != ICM20602_OK) {
+    Serial.println(F("Frame ICM20602 FAILED"));
+    while (true) delay(1000);
+  }
+  Serial.println(F("Frame IMU OK"));
 
-    
+  // Bias (платформа должна быть неподвижна!)
+  calibrateGyroBias();
 
-
-
-
+  // ----- Энкодер и мотор -----
   sensor.init();
-
   motor.linkSensor(&sensor);
 
   driver.voltage_power_supply = POWER_SUPPLY;
   driver.init();
   motor.linkDriver(&driver);
 
-  motor.linkCustomMotionControl(stage2MotionControl);
-  motor.controller = MotionControlType::custom;
+  // Режим torque + voltage
+  motor.controller = MotionControlType::torque;
   motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SinePWM;
 
-  motor.P_angle.P = 4.0f;
-  motor.P_angle.I = 10.0f;
-  motor.P_angle.D = 0.0f;
-
-  gyro_pid.P = 1.0f;
-  gyro_pid.I = 0.0f;
-  gyro_pid.D = 0.0f;
-  gyro_lpf.Tf = 0.0f;
-
   motor.voltage_limit = 4.0f;
-  motor.PID_velocity.limit = motor.voltage_limit;
-  motor.P_angle.limit = motor.voltage_limit;
-  motor.P_angle.Ts = CONTROL_DT;
+  rate_pid.limit = motor.voltage_limit;
   motor.velocity_limit = 20.0f;
 
   motor.init();
@@ -254,46 +212,36 @@ void setup() {
   motor.initFOC();
 #endif
 
-  command.add('T', doTarget, "target velocity [rad/s]");
+  // ----- Commander -----
   command.add('W', doPower, "power 0/1");
-  command.add('P', doP, "P_angle.P");
-  command.add('I', doI, "P_angle.I");
-  command.add('D', doD, "P_angle.D");
-  command.add('A', doGyroP, "gyro_pid.P");
-  command.add('B', doGyroI, "gyro_pid.I");
-  command.add('C', doGyroD, "gyro_pid.D");
-  command.add('L', doVLim, "voltage_limit");
-  command.add('V', doVelLim, "velocity_limit");
-  command.add('F', doLfp, "FilTER");
-  command.add('E', doGyroLpf, "gyro_lpf.Tf");
+  command.add('P', doRateP, "rate P");
+  command.add('I', doRateI, "rate I");
+  command.add('D', doRateD, "rate D");
+  command.add('F', doRateLpf, "rate LPF Tf");
+  command.add('S', doSpeedCmd, "external speed cmd");
+  command.add('L', doVLim, "voltage limit");
 
   command.verbose = VerboseMode::nothing;
 
-  Serial.println(F("ready"));
-  _delay(200);
+  Serial.println(F("System ready. Send W1 to enable motor."));
+  Serial.println(F("Commands: A(P) B(I) C(D) E(LPF) S(speed) L(Vlim) W(power)"));
 
-   xTaskCreatePinnedToCore(motorControlTask, "MotorCtrl", 4096, NULL, 5, NULL,
-                           1);
-  xTaskCreate(GyroTask, "Gyro", 4096, NULL, 5, NULL);
-
+  // Задача управления на ядре 1
+  xTaskCreatePinnedToCore(controlTask, "Control", 8192, NULL, 5, NULL, 1);
 }
 
+// ===================== Loop =====================
 void loop() {
   command.run();
 
-
-
-  //   if (imu.read(gyro, accel, &temp) == ICM20602_OK) {
-  //       Serial.printf("Gyro:  %+7.2f %+7.2f %+7.2f  °/s\n", gyro[0], gyro[1], gyro[2]);
-  //       Serial.printf("Accel: %+7.3f %+7.3f %+7.3f  g\n",   accel[0], accel[1], accel[2]);
-  //       Serial.printf("Temp:  %+6.1f °C\n\n", temp);
-  //   } else {
-  //       Serial.println("Read error");
-  //   }
-
-  //
-  Serial1.printf("%f,%f,%f,%f,%f,%f,%f,%f\n", target_velocity,
-                 motor.shaft_angle, motor.voltage.q, (float)position_setpoint,
-                 filtred, filter2dval, motor.shaft_velocity,
-                 (float)_micros() * 1e-6f);
+  // Телеметрия (можно смотреть в VOFA+ или Serial)
+  // relative_rate можно добавить в вывод при необходимости
+  Serial1.printf("%f,%f,%f,%f,%f,%f,%f\n",
+                 external_speed_cmd,
+                 motor.voltage.q,
+                 motor.shaft_velocity,
+                 (float)motor.shaft_angle,
+                 relative_rate,
+                 frame_rate,
+                platform_rate);
 }

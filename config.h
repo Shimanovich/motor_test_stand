@@ -2,7 +2,7 @@
 
 // Пины
 
-#if 1
+
 #define CUSTOM_RX_PIN 16
 #define CUSTOM_TX_PIN 17
 #define SENSOR_CS_PIN 5
@@ -10,21 +10,20 @@
 #define DRIVER_PWM_B 23
 #define DRIVER_PWM_C 2
 #define DRIVER_EN 27
-#endif
 
-#if 0
-#define CUSTOM_RX_PIN 16
-#define CUSTOM_TX_PIN 17
-#define SENSOR_CS_PIN 5
-#define DRIVER_PWM_A 12
-#define DRIVER_PWM_B 13
-#define DRIVER_PWM_C 14
-#define DRIVER_EN 27
-#endif
 
-#define SDA_PIN 21
-#define SCL_PIN 22
-#define I2C_CLOCK 100000
+
+
+
+
+#define SDA_PIN 25
+#define SCL_PIN 26
+#define I2C_CLOCK 400000
+
+// Второй IMU (рама)
+#define FRAME_SDA_PIN 21
+#define FRAME_SCL_PIN 22
+#define I2C_FRAME_CLOCK 400000
 
 // Параметры мотора
 #define MOTOR_PP 7
