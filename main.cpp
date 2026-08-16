@@ -25,7 +25,7 @@ CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 ICM20602 imu;
 
 volatile float target_velocity = 0.0f;
-int powerOn = 0;
+volatile int powerOn = 0;
 
 double position_setpoint = 0.0;
 
@@ -36,6 +36,12 @@ float filter2dval = 0.0f;
 
 float tmp_speed = 0.0f;
 PIDController gyro_pid = PIDController(1.0f, 0.0f, 0.0f, 0.0f, 20.0f);
+LowPassFilter gyro_lpf = LowPassFilter(0.0f);
+
+// Состояние кастомного регулятора: должно сбрасываться при включении,
+// иначе после disable/enable на фазы уходит прошлое напряжение.
+float motion_out = 0.0f;
+float motion_old_shaft_angle = NAN;
 
 Commander command = Commander(Serial1);
 
@@ -80,18 +86,47 @@ uint8_t scanI2C() {
 
 void doTarget(char* cmd) { command.scalar((float*)&target_velocity, cmd); }
 
+// Только силовая команда. Гироскоп не трогаем — его поток нужен и при выключенном моторе.
+void zeroMotorVoltage() {
+  motor.P_angle.reset();
+  motor.PID_velocity.reset();
+  motor.current_sp = 0.0f;
+  motor.voltage.q = 0.0f;
+  motor.voltage.d = 0.0f;
+  motion_out = 0.0f;
+  motion_old_shaft_angle = NAN;
+}
+
+void syncSetpointToRotor() {
+  if (motor.sensor) motor.sensor->update();
+  motor.shaft_angle = motor.shaftAngle();
+  motor.electrical_angle = motor.electricalAngle();
+  position_setpoint = (double)motor.shaft_angle;
+  motor.target = motor.shaft_angle;
+}
+
 void doPower(char* cmd) {
-  float in;
+  float in = 0.0f;
   command.scalar(&in, cmd);
-  powerOn = (int)in;
-  if (!powerOn) {
-    target_velocity = 0.0f;
+
+  if ((int)in == 0) {
+    powerOn = 0;
+    zeroMotorVoltage();
     motor.disable();
-  } else {
-    motor.enable();
-    motor.loopFOC();
-    position_setpoint = (float)motor.shaft_angle;
+    return;
   }
+
+  powerOn = 0;
+  zeroMotorVoltage();
+  syncSetpointToRotor();
+
+  motor.enable();
+  // enable() ставит PWM 0/0/0; сразу выставляем Uq=0 (центрированная синусоида),
+  // иначе первый loopFOC() из задачи применит старый current_sp.
+  motor.current_sp = 0.0f;
+  motor.setPhaseVoltage(0.0f, 0.0f, motor.electrical_angle);
+
+  powerOn = 1;
 }
 
 void doP(char* cmd) { command.scalar(&motor.P_angle.P, cmd); }
@@ -102,17 +137,15 @@ void doGyroP(char* cmd) { command.scalar(&gyro_pid.P, cmd); }
 void doGyroI(char* cmd) { command.scalar(&gyro_pid.I, cmd); }
 void doGyroD(char* cmd) { command.scalar(&gyro_pid.D, cmd); }
 
-void doGyroP(char* cmd) { command.scalar(&gyro_pid.P, cmd); }
-void doGyroI(char* cmd) { command.scalar(&gyro_pid.I, cmd); }
-void doGyroD(char* cmd) { command.scalar(&gyro_pid.D, cmd); }
-
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
   motor.PID_velocity.limit = motor.voltage_limit;
+  motor.P_angle.limit = motor.voltage_limit;
 }
 void doVelLim(char* cmd) { command.scalar(&motor.velocity_limit, cmd); }
 
 void doLfp(char* cmd) { command.scalar(&motor.LPF_angle.Tf, cmd); }
+void doGyroLpf(char* cmd) { command.scalar(&gyro_lpf.Tf, cmd); }
 
 void motorControlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -123,6 +156,10 @@ void motorControlTask(void* pvParameters) {
       position_setpoint += (double)target_velocity * CONTROL_DT;
       motor.loopFOC();
       motor.move((float)position_setpoint);
+    } else if (motor.sensor) {
+      motor.sensor->update();
+      motor.shaft_angle = motor.shaftAngle();
+      motor.shaft_velocity = motor.shaftVelocity();
     }
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -135,24 +172,23 @@ void GyroTask(void* pvParameters) {
   for (;;) {
     float gyro[3], accel[3], temp;
     imu.read(gyro, accel, &temp);
-    target_velocity = -gyro[2] * 0.0174533f; // rad/s
+    tmp_speed = -gyro[2] * 0.0174533f; // rad/s
+    tmp_speed = gyro_lpf(tmp_speed);
+    target_velocity = gyro_pid(tmp_speed);
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
 
 float stage2MotionControl(FOCMotor* m) {
-  static float cur_out = 0;
-  float oldshaft_angle;
   m->shaft_angle_sp = m->target;
 
-  if (oldshaft_angle != m->shaft_angle) {
+  if (isnan(motion_old_shaft_angle) || motion_old_shaft_angle != m->shaft_angle) {
     filtred = m->shaft_angle;
-    //cur_out = m->LPF_angle(m->P_angle(m->shaft_angle_sp - filtred));
-    cur_out = m->P_angle(m->shaft_angle_sp - filtred);
-    oldshaft_angle = m->shaft_angle;
+    motion_out = m->P_angle(m->shaft_angle_sp - filtred);
+    motion_old_shaft_angle = m->shaft_angle;
   }
-  return cur_out;
+  return motion_out;
 }
 
 void setup() {
@@ -194,8 +230,15 @@ void setup() {
   motor.P_angle.I = 10.0f;
   motor.P_angle.D = 0.0f;
 
+  gyro_pid.P = 1.0f;
+  gyro_pid.I = 0.0f;
+  gyro_pid.D = 0.0f;
+  gyro_lpf.Tf = 0.0f;
+
   motor.voltage_limit = 4.0f;
   motor.PID_velocity.limit = motor.voltage_limit;
+  motor.P_angle.limit = motor.voltage_limit;
+  motor.P_angle.Ts = CONTROL_DT;
   motor.velocity_limit = 20.0f;
 
   motor.init();
@@ -216,9 +259,13 @@ void setup() {
   command.add('P', doP, "P_angle.P");
   command.add('I', doI, "P_angle.I");
   command.add('D', doD, "P_angle.D");
+  command.add('A', doGyroP, "gyro_pid.P");
+  command.add('B', doGyroI, "gyro_pid.I");
+  command.add('C', doGyroD, "gyro_pid.D");
   command.add('L', doVLim, "voltage_limit");
   command.add('V', doVelLim, "velocity_limit");
   command.add('F', doLfp, "FilTER");
+  command.add('E', doGyroLpf, "gyro_lpf.Tf");
 
   command.verbose = VerboseMode::nothing;
 
