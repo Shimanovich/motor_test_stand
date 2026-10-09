@@ -34,22 +34,24 @@ BLDCDriver3PWM driver =
     BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
 // ===================== Регуляторы =====================
-// Внутренний Rate-контур (ваши текущие рабочие значения)
+// Внутренний Rate-контур
 PIDController rate_pid(0.13f, 0.0f, 0.0f, 1000.0f, 4.0f);
 LowPassFilter rate_lpf(0.017f);
+LowPassFilter frame_lpf(0.017f);
 
-// Внешний Angle-контур (очень мягкие стартовые значения)
-PIDController angle_pid(2.0f, 0.0f, 0.0f, 1000.0f,
-                        6.0f);  // выход = desired_rate
+// Внешний Angle-контур, выход = desired_rate
+PIDController angle_pid(2.0f, 0.0f, 0.0f, 1000.0f, 6.0f);
 
 // Состояние
 volatile int powerOn = 0;
-volatile float external_speed_cmd = 0.0f;  // будущая команда скорости
+volatile float external_speed_cmd = 0.0f;  // рад/с, прибавляется к desired_rate
+volatile float k_ff = 0.0f;  // 0 = выкл, 0.5..1.0 = упреждение по раме
 
 float platform_rate = 0.0f;
 float frame_rate = 0.0f;
-float platform_angle = 0.0f;  // интегрированный угол
-float desired_angle = 0.0f;   // целевой угол (обычно 0)
+float platform_angle = 0.0f;
+float desired_angle = 0.0f;
+float desired_rate = 0.0f;
 
 // Commander
 Commander command = Commander(Serial1);
@@ -74,7 +76,7 @@ void doPower(char* cmd) {
     return;
   }
 
-  // При включении сбрасываем угол — держим текущую ориентацию
+  // При включении держим текущую ориентацию
   platform_angle = 0.0f;
   desired_angle = 0.0f;
   zeroMotorVoltage();
@@ -92,6 +94,7 @@ void doAngleI(char* cmd) { command.scalar(&angle_pid.I, cmd); }
 void doAngleD(char* cmd) { command.scalar(&angle_pid.D, cmd); }
 
 void doSpeedCmd(char* cmd) { command.scalar((float*)&external_speed_cmd, cmd); }
+void doFeedforward(char* cmd) { command.scalar((float*)&k_ff, cmd); }
 void doVLim(char* cmd) {
   command.scalar(&motor.voltage_limit, cmd);
   rate_pid.limit = motor.voltage_limit;
@@ -133,43 +136,37 @@ void controlTask(void* pvParameters) {
   const TickType_t xFrequency = 1;
 
   for (;;) {
-    // 1. Чтение IMU
     float gp[3], ap[3], tp;
     float gf[3], af[3], tf;
 
     imu_platform.read(gp, ap, &tp);
     imu_frame.read(gf, af, &tf);
 
-    // 2. Platform rate (рад/с)
     platform_rate = (gp[2] - platform_gyro_bias) * 0.017453292519943f;
     frame_rate = (gf[2] - frame_gyro_bias) * 0.017453292519943f;
 
     platform_rate = rate_lpf(platform_rate);
+    frame_rate = frame_lpf(frame_rate);
 
-    // 3. Интегрирование угла
     if (powerOn) {
       platform_angle += platform_rate * CONTROL_DT;
     }
 
-    // 4. Каскад
-    // Внешний контур — Angle
+    // Каскад. Второй гироскоп только упреждает, не заменяет платформенный.
     float angle_error = desired_angle - platform_angle;
-    float desired_rate = angle_pid(angle_error);
+    desired_rate =
+        angle_pid(angle_error) + external_speed_cmd - k_ff * frame_rate;
 
-    // Внутренний контур — Rate
     float rate_error = desired_rate - platform_rate;
-    float u = rate_pid(rate_error) + external_speed_cmd;
+    float u = rate_pid(rate_error);
 
-    // 5. Мотор
     if (powerOn) {
       motor.loopFOC();
       motor.move(u);
-    } else {
-      if (motor.sensor) {
-        motor.sensor->update();
-        motor.shaft_angle = motor.shaftAngle();
-        motor.shaft_velocity = motor.shaftVelocity();
-      }
+    } else if (motor.sensor) {
+      motor.sensor->update();
+      motor.shaft_angle = motor.shaftAngle();
+      motor.shaft_velocity = motor.shaftVelocity();
     }
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -183,11 +180,9 @@ void setup() {
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
 
-  // I2C
   Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK);
   I2C_frame.begin(FRAME_SDA_PIN, FRAME_SCL_PIN, I2C_FRAME_CLOCK);
 
-  // IMU
   Serial.println(F("Init platform IMU..."));
   if (imu_platform.begin(0x68, &Wire) != ICM20602_OK) {
     Serial.println(F("Platform ICM20602 FAILED"));
@@ -204,7 +199,6 @@ void setup() {
 
   calibrateGyroBias();
 
-  // Мотор
   sensor.init();
   motor.linkSensor(&sensor);
 
@@ -233,23 +227,23 @@ void setup() {
   motor.initFOC();
 #endif
 
-  // Commander
   command.add('W', doPower, "power 0/1");
   command.add('P', doRateP, "rate P");
   command.add('I', doRateI, "rate I");
   command.add('D', doRateD, "rate D");
   command.add('F', doRateLpf, "rate LPF");
-
   command.add('A', doAngleP, "angle P");
   command.add('B', doAngleI, "angle I");
   command.add('C', doAngleD, "angle D");
-  command.add('S', doSpeedCmd, "external speed");
+  command.add('S', doSpeedCmd, "external speed rad/s");
+  command.add('K', doFeedforward, "frame feedforward 0..1");
   command.add('L', doVLim, "voltage limit");
 
   command.verbose = VerboseMode::nothing;
 
-  Serial.println(F("System ready (Angle + Rate cascade)"));
-  Serial.println(F("Commands: W P I D F A B C S L"));
+  Serial.println(F("System ready (Angle + Rate + frame FF)"));
+  Serial.println(F("Commands: W P I D F A B C S K L"));
+  Serial.println(F("Start with K0. Raise K only if lag decreases."));
 
   xTaskCreatePinnedToCore(controlTask, "Control", 8192, NULL, 5, NULL, 1);
 }
@@ -258,6 +252,7 @@ void setup() {
 void loop() {
   command.run();
 
-  Serial1.printf("%.3f,%.3f,%.3f,%.4f\n", external_speed_cmd, motor.voltage.q,
-                 platform_rate, platform_angle);
+  Serial1.printf("%.3f,%.3f,%.3f,%.3f,%.4f,%.3f\n", external_speed_cmd,
+                 motor.voltage.q, platform_rate, frame_rate, platform_angle,
+                 desired_rate);
 }
