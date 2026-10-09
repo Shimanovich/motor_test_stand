@@ -1,11 +1,11 @@
 #include <SimpleFOC.h>
+#include <Wire.h>
 #include <encoders/calibrated/CalibratedSensor.h>
 #include <encoders/mt6701/MagneticSensorMT6701SSI.h>
-#include <Wire.h>
 
 #include "config.h"
-#include "luts.h"
 #include "icm20602.h"
+#include "luts.h"
 
 // ===================== Датчики =====================
 MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
@@ -13,7 +13,8 @@ MagneticSensorMT6701SSI sensor = MagneticSensorMT6701SSI(SENSOR_CS_PIN);
 #define MOTOR_IS_CALIBRATED 1
 
 #if MOTOR_IS_CALIBRATED
-CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL, calibrationLut);
+CalibratedSensor sensor_calibrated =
+    CalibratedSensor(sensor, LUTS_TOTAL, calibrationLut);
 #else
 CalibratedSensor sensor_calibrated = CalibratedSensor(sensor, LUTS_TOTAL);
 #endif
@@ -25,11 +26,12 @@ ICM20602 imu_frame;
 
 // Bias
 float platform_gyro_bias = 0.0f;
-float frame_gyro_bias    = 0.0f;
+float frame_gyro_bias = 0.0f;
 
 // ===================== Мотор =====================
 BLDCMotor motor = BLDCMotor(MOTOR_PP, MOTOR_R, MOTOR_KV, MOTOR_L);
-BLDCDriver3PWM driver = BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
+BLDCDriver3PWM driver =
+    BLDCDriver3PWM(DRIVER_PWM_A, DRIVER_PWM_B, DRIVER_PWM_C, DRIVER_EN);
 
 // ===================== Регуляторы =====================
 // Внутренний Rate-контур (ваши текущие рабочие значения)
@@ -37,16 +39,17 @@ PIDController rate_pid(0.13f, 0.0f, 0.0f, 1000.0f, 4.0f);
 LowPassFilter rate_lpf(0.017f);
 
 // Внешний Angle-контур (очень мягкие стартовые значения)
-PIDController angle_pid(2.0f, 0.0f, 0.0f, 1000.0f, 6.0f);  // выход = desired_rate
+PIDController angle_pid(2.0f, 0.0f, 0.0f, 1000.0f,
+                        6.0f);  // выход = desired_rate
 
 // Состояние
 volatile int powerOn = 0;
-volatile float external_speed_cmd = 0.0f;   // будущая команда скорости
+volatile float external_speed_cmd = 0.0f;  // будущая команда скорости
 
-float platform_rate  = 0.0f;
-float frame_rate     = 0.0f;
-float platform_angle = 0.0f;               // интегрированный угол
-float desired_angle  = 0.0f;               // целевой угол (обычно 0)
+float platform_rate = 0.0f;
+float frame_rate = 0.0f;
+float platform_angle = 0.0f;  // интегрированный угол
+float desired_angle = 0.0f;   // целевой угол (обычно 0)
 
 // Commander
 Commander command = Commander(Serial1);
@@ -73,20 +76,20 @@ void doPower(char* cmd) {
 
   // При включении сбрасываем угол — держим текущую ориентацию
   platform_angle = 0.0f;
-  desired_angle  = 0.0f;
+  desired_angle = 0.0f;
   zeroMotorVoltage();
   motor.enable();
   powerOn = 1;
 }
 
-void doRateP(char* cmd)    { command.scalar(&rate_pid.P, cmd); }
-void doRateI(char* cmd)    { command.scalar(&rate_pid.I, cmd); }
-void doRateD(char* cmd)    { command.scalar(&rate_pid.D, cmd); }
-void doRateLpf(char* cmd)  { command.scalar(&rate_lpf.Tf, cmd); }
+void doRateP(char* cmd) { command.scalar(&rate_pid.P, cmd); }
+void doRateI(char* cmd) { command.scalar(&rate_pid.I, cmd); }
+void doRateD(char* cmd) { command.scalar(&rate_pid.D, cmd); }
+void doRateLpf(char* cmd) { command.scalar(&rate_lpf.Tf, cmd); }
 
-void doAngleP(char* cmd)   { command.scalar(&angle_pid.P, cmd); }
-void doAngleI(char* cmd)   { command.scalar(&angle_pid.I, cmd); }
-void doAngleD(char* cmd)   { command.scalar(&angle_pid.D, cmd); }
+void doAngleP(char* cmd) { command.scalar(&angle_pid.P, cmd); }
+void doAngleI(char* cmd) { command.scalar(&angle_pid.I, cmd); }
+void doAngleD(char* cmd) { command.scalar(&angle_pid.D, cmd); }
 
 void doSpeedCmd(char* cmd) { command.scalar((float*)&external_speed_cmd, cmd); }
 void doVLim(char* cmd) {
@@ -116,14 +119,15 @@ void calibrateGyroBias() {
   }
 
   platform_gyro_bias = sum_p / samples;
-  frame_gyro_bias    = sum_f / samples;
+  frame_gyro_bias = sum_f / samples;
 
   Serial.printf("Platform gyro bias Z: %.4f deg/s\n", platform_gyro_bias);
   Serial.printf("Frame gyro bias Z:    %.4f deg/s\n", frame_gyro_bias);
   Serial.println(F("Bias calibration done."));
 }
 
-// ===================== Основная задача управления (1 кГц) =====================
+// ===================== Основная задача управления (1 кГц)
+// =====================
 void controlTask(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   const TickType_t xFrequency = 1;
@@ -138,7 +142,7 @@ void controlTask(void* pvParameters) {
 
     // 2. Platform rate (рад/с)
     platform_rate = (gp[2] - platform_gyro_bias) * 0.017453292519943f;
-    frame_rate    = (gf[2] - frame_gyro_bias)    * 0.017453292519943f;
+    frame_rate = (gf[2] - frame_gyro_bias) * 0.017453292519943f;
 
     platform_rate = rate_lpf(platform_rate);
 
@@ -150,11 +154,11 @@ void controlTask(void* pvParameters) {
     // 4. Каскад
     // Внешний контур — Angle
     float angle_error = desired_angle - platform_angle;
-    float desired_rate = angle_pid(angle_error) + external_speed_cmd;
+    float desired_rate = angle_pid(angle_error);
 
     // Внутренний контур — Rate
     float rate_error = desired_rate - platform_rate;
-    float u = rate_pid(rate_error);
+    float u = rate_pid(rate_error) + external_speed_cmd;
 
     // 5. Мотор
     if (powerOn) {
@@ -210,7 +214,7 @@ void setup() {
 
   motor.controller = MotionControlType::torque;
   motor.torque_controller = TorqueControlType::voltage;
-  motor.foc_modulation = FOCModulationType::SinePWM;
+  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
 
   motor.voltage_limit = 4.0f;
   rate_pid.limit = motor.voltage_limit;
@@ -230,17 +234,17 @@ void setup() {
 #endif
 
   // Commander
-  command.add('W', doPower,      "power 0/1");
-  command.add('P', doRateP,      "rate P");
-  command.add('I', doRateI,      "rate I");
-  command.add('D', doRateD,      "rate D");
-  command.add('F', doRateLpf,    "rate LPF");
+  command.add('W', doPower, "power 0/1");
+  command.add('P', doRateP, "rate P");
+  command.add('I', doRateI, "rate I");
+  command.add('D', doRateD, "rate D");
+  command.add('F', doRateLpf, "rate LPF");
 
-  command.add('A', doAngleP,     "angle P");
-  command.add('B', doAngleI,     "angle I");
-  command.add('C', doAngleD,     "angle D");
-  command.add('S', doSpeedCmd,   "external speed");
-  command.add('L', doVLim,       "voltage limit");
+  command.add('A', doAngleP, "angle P");
+  command.add('B', doAngleI, "angle I");
+  command.add('C', doAngleD, "angle D");
+  command.add('S', doSpeedCmd, "external speed");
+  command.add('L', doVLim, "voltage limit");
 
   command.verbose = VerboseMode::nothing;
 
@@ -254,10 +258,6 @@ void setup() {
 void loop() {
   command.run();
 
-  Serial1.printf("%.3f,%.3f,%.3f,%.4f\n",
-                 external_speed_cmd,
-                 motor.voltage.q,
-                 platform_rate,
-                 platform_angle
-                );
+  Serial1.printf("%.3f,%.3f,%.3f,%.4f\n", external_speed_cmd, motor.voltage.q,
+                 platform_rate, platform_angle);
 }
