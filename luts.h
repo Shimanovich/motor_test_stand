@@ -3,9 +3,7 @@
 #define LUTS_TOTAL 1024
 #include <common/base_classes/Sensor.h>
 
-// home bldc
-#if 1  
-float calibrationLut[LUTS_TOTAL] = {
+float calibrationLut_1[LUTS_TOTAL] = {
     0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,
     0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,
     0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,  0.002827,
@@ -154,15 +152,10 @@ float calibrationLut[LUTS_TOTAL] = {
     0.003745,  0.003745,  0.003745,  0.003745,  0.003745,  0.003745,  0.003745,
     0.003745,  0.003745};
 
-float zero_electric_angle_calibrated = 1.044098;
-Direction sensor_direction_calibrated = Direction::CW;
+float zero_electric_angle_calibrated_1 = 1.044098;
+Direction sensor_direction_calibrated_1 = Direction::CW;
 
-#endif
-
-// bldc at work
-#if 0
-
-float calibrationLut[LUTS_TOTAL] = {
+float calibrationLut_2[LUTS_TOTAL] = {
     -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559,
     -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.001945,
     -0.001945, -0.001945, -0.001945, -0.001945, -0.001945, -0.001945, -0.001945,
@@ -311,6 +304,5 @@ float calibrationLut[LUTS_TOTAL] = {
     -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559, -0.000559,
     -0.000559, -0.000559};
 
-float zero_electric_angle_calibrated = 0.367574;
-Direction sensor_direction_calibrated = Direction::CW;
-#endif
+float zero_electric_angle_calibrated_2 = 0.367574;
+Direction sensor_direction_calibrated_2 = Direction::CW;
