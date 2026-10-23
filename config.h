@@ -38,3 +38,15 @@
 // Управление 2 кГц
 #define CONTROL_HZ 2000
 #define CONTROL_DT 0.0005f
+
+// === Маппинг осей IMU (настроить под ориентацию датчика) ===
+// gyro[0] = X, gyro[1] = Y, gyro[2] = Z (deg/s)
+// X параллельна оси pitch-мотора
+#define IMU_AXIS_PITCH 0  // X
+#define IMU_AXIS_YAW 2    // Z (поменять на 1 если нужно)
+#define IMU_SIGN_PITCH -1.0f
+#define IMU_SIGN_YAW 1.0f
+
+// Комплементарный фильтр (pitch к горизонту)
+#define COMPLEMENTARY_ALPHA 0.98f  // вес гироскопа (0.95–0.995)
+#define ACCEL_PITCH_SIGN 1.0f      // знак atan2, подстроить по факту
