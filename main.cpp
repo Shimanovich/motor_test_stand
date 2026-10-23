@@ -60,6 +60,10 @@ float platform_angle = 0.0f;
 float desired_angle = 0.0f;
 float desired_rate = 0.0f;
 
+float gyrodata[3];
+float acelldata[3];
+float gyroTemp;
+
 Commander command = Commander(Serial1);
 
 static const float CONTROL_DT_2K = 0.0005f;
@@ -79,6 +83,10 @@ void zeroMotorVoltage() {
   motor_pitch.current_sp = 0.0f;
   motor_pitch.voltage.q = 0.0f;
   motor_pitch.voltage.d = 0.0f;
+
+  float gyrodata[3];
+  float acelldata[3];
+  float gyroTemp;
 
   rate_pid.reset();
   angle_pid.reset();
@@ -156,8 +164,10 @@ void controlTask(void* pvParameters) {
   TickType_t lastWakeTime = xTaskGetTickCount();
 
   for (;;) {
-    // float g[3] = {0, 0, 0};
-    // if (imu_platform.readGyro(g) == ICM20602_OK) {
+    float g[3] = {0, 0, 0};
+    if (imu_platform.read(gyrodata, acelldata, &gyroTemp) == ICM20602_OK) {
+    }
+
     //   platform_rate_raw = (g[2] - platform_gyro_bias) * 0.017453292519943f;
     // }
 
@@ -206,22 +216,6 @@ void setup() {
 
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, CUSTOM_RX_PIN, CUSTOM_TX_PIN);
-
-  // uart для внешнего гироскопа
-  //  // Настройка UART через IDF
-  //  uart_config_t cfg = {
-  //      .baud_rate = 921600,
-  //      .data_bits = UART_DATA_8_BITS,
-  //      .parity = UART_PARITY_EVEN,
-  //      .stop_bits = UART_STOP_BITS_1,
-  //      .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-  //      .source_clk = UART_SCLK_APB,
-  //  };
-
-  // uart_driver_install(GYRO_UART_NUM, GYRO_BUF_SIZE * 2, 0, 0, nullptr, 0);
-  // uart_param_config(GYRO_UART_NUM, &cfg);
-  // uart_set_pin(GYRO_UART_NUM, UART_PIN_NO_CHANGE, GYRO_RX_PIN,
-  //              UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
   Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK);
 
@@ -319,9 +313,21 @@ void loop() {
   //                motor_pitch.voltage.q, platform_rate, platform_angle,
   //                desired_rate);
 
-  Serial1.printf("%f,%f,%f,%f\n", sensor_yaw_calibrated.getAngle(),
-                 sensor_pitch_calibrated.getAngle(), motor_yaw.voltage.q,
-                 motor_pitch.voltage.q);
+  Serial1.printf("%f,", sensor_yaw_calibrated.getAngle());
+  Serial1.printf("%f,", sensor_pitch_calibrated.getAngle());
+
+  Serial1.printf("%f,", motor_yaw.voltage.q);
+  Serial1.printf("%f,", motor_pitch.voltage.q);
+
+  Serial1.printf("%f,", gyrodata[0]);
+  Serial1.printf("%f,", gyrodata[1]);
+  Serial1.printf("%f,", gyrodata[2]);
+
+  Serial1.printf("%f,", acelldata[0]);
+  Serial1.printf("%f,", acelldata[1]);
+  Serial1.printf("%f", acelldata[2]);
+
+  Serial1.printf("\n");
 
   // Serial1.printf("%f,%f,%f\n", platform_rate_raw, platform_rate_raw_i2c,
   //                platform_rate_raw / platform_rate_raw_i2c);
